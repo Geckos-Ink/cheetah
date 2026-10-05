@@ -1,0 +1,244 @@
+{
+    "en": {
+        "description": "GEM is a benchmark environment for Natural Language Generation with a focus on its Evaluation,\nboth through human annotations and automated Metrics.\n\nGEM aims to:\n- measure NLG progress across 13 datasets spanning many NLG tasks and languages.\n- provide an in-depth analysis of data and models presented via data statements and challenge sets.\n- develop standards for evaluation of generated text using both automated and human metrics.\n\nIt is our goal to regularly update GEM and to encourage toward more inclusive practices in dataset development\nby extending existing data or developing datasets for additional languages.\n",
+        "citation": "@article{gem_benchmark,\n  author    = {Sebastian Gehrmann and\n               Tosin P. Adewumi and\n               Karmanya Aggarwal and\n               Pawan Sasanka Ammanamanchi and\n               Aremu Anuoluwapo and\n               Antoine Bosselut and\n               Khyathi Raghavi Chandu and\n               Miruna{-}Adriana Clinciu and\n               Dipanjan Das and\n               Kaustubh D. Dhole and\n               Wanyu Du and\n               Esin Durmus and\n               Ondrej Dusek and\n               Chris Emezue and\n               Varun Gangal and\n               Cristina Garbacea and\n               Tatsunori Hashimoto and\n               Yufang Hou and\n               Yacine Jernite and\n               Harsh Jhamtani and\n               Yangfeng Ji and\n               Shailza Jolly and\n               Dhruv Kumar and\n               Faisal Ladhak and\n               Aman Madaan and\n               Mounica Maddela and\n               Khyati Mahajan and\n               Saad Mahamood and\n               Bodhisattwa Prasad Majumder and\n               Pedro Henrique Martins and\n               Angelina McMillan{-}Major and\n               Simon Mille and\n               Emiel van Miltenburg and\n               Moin Nadeem and\n               Shashi Narayan and\n               Vitaly Nikolaev and\n               Rubungo Andre Niyongabo and\n               Salomey Osei and\n               Ankur P. Parikh and\n               Laura Perez{-}Beltrachini and\n               Niranjan Ramesh Rao and\n               Vikas Raunak and\n               Juan Diego Rodriguez and\n               Sashank Santhanam and\n               Joao Sedoc and\n               Thibault Sellam and\n               Samira Shaikh and\n               Anastasia Shimorina and\n               Marco Antonio Sobrevilla Cabezudo and\n               Hendrik Strobelt and\n               Nishant Subramani and\n               Wei Xu and\n               Diyi Yang and\n               Akhila Yerukola and\n               Jiawei Zhou},\n  title     = {The {GEM} Benchmark: Natural Language Generation, its Evaluation and\n               Metrics},\n  journal   = {CoRR},\n  volume    = {abs/2102.01672},\n  year      = {2021},\n  url       = {https://arxiv.org/abs/2102.01672},\n  archivePrefix = {arXiv},\n  eprint    = {2102.01672}\n}\n",
+        "homepage": "https://gem-benchmark.github.io/",
+        "license": "CC-BY-SA-4.0",
+        "features": {
+            "gem_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "gem_parent_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "input": [
+                {
+                    "dtype": "string",
+                    "id": null,
+                    "_type": "Value"
+                }
+            ],
+            "target": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "references": [
+                {
+                    "dtype": "string",
+                    "id": null,
+                    "_type": "Value"
+                }
+            ],
+            "category": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "webnlg_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            }
+        },
+        "post_processed": null,
+        "supervised_keys": null,
+        "builder_name": "gem",
+        "config_name": "en",
+        "version": {
+            "version_str": "1.1.0",
+            "description": null,
+            "major": 1,
+            "minor": 1,
+            "patch": 0
+        },
+        "splits": {
+            "train": {
+                "name": "train",
+                "num_bytes": 13067615,
+                "num_examples": 35426,
+                "dataset_name": "gem"
+            },
+            "validation": {
+                "name": "validation",
+                "num_bytes": 1153995,
+                "num_examples": 1667,
+                "dataset_name": "gem"
+            },
+            "test": {
+                "name": "test",
+                "num_bytes": 1403601,
+                "num_examples": 1779,
+                "dataset_name": "gem"
+            },
+            "challenge_train_sample": {
+                "name": "challenge_train_sample",
+                "num_bytes": 193198,
+                "num_examples": 502,
+                "dataset_name": "gem"
+            },
+            "challenge_validation_sample": {
+                "name": "challenge_validation_sample",
+                "num_bytes": 359868,
+                "num_examples": 499,
+                "dataset_name": "gem"
+            },
+            "challenge_test_scramble": {
+                "name": "challenge_test_scramble",
+                "num_bytes": 402407,
+                "num_examples": 500,
+                "dataset_name": "gem"
+            },
+            "challenge_test_numbers": {
+                "name": "challenge_test_numbers",
+                "num_bytes": 409213,
+                "num_examples": 500,
+                "dataset_name": "gem"
+            }
+        },
+        "download_checksums": {
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_en_train.json": {
+                "num_bytes": 10135450,
+                "checksum": "959646a986465c436362dfc44bb4966d5a2d39f2725b39fe32701981daf666d0"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_en_val.json": {
+                "num_bytes": 1273018,
+                "checksum": "8214bf87ff0369e505ba5c11cdbbaa1127f7908ad77a75a2f1d1a76730c3a954"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_en_test.json": {
+                "num_bytes": 1537460,
+                "checksum": "68a4a919a9b805e17959a52f7d5c14a6083bba1459645b4189824fca468e362d"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_challenge_sets/web_nlg_en.zip": {
+                "num_bytes": 236041,
+                "checksum": "42740fc1010cbc490a023b5ec13c55b95acc848b7b459a9a586242b444b1ba40"
+            }
+        },
+        "download_size": 13181969,
+        "post_processing_size": null,
+        "dataset_size": 16989897,
+        "size_in_bytes": 30171866
+    },
+    "ru": {
+        "description": "GEM is a benchmark environment for Natural Language Generation with a focus on its Evaluation,\nboth through human annotations and automated Metrics.\n\nGEM aims to:\n- measure NLG progress across 13 datasets spanning many NLG tasks and languages.\n- provide an in-depth analysis of data and models presented via data statements and challenge sets.\n- develop standards for evaluation of generated text using both automated and human metrics.\n\nIt is our goal to regularly update GEM and to encourage toward more inclusive practices in dataset development\nby extending existing data or developing datasets for additional languages.\n",
+        "citation": "@article{gem_benchmark,\n  author    = {Sebastian Gehrmann and\n               Tosin P. Adewumi and\n               Karmanya Aggarwal and\n               Pawan Sasanka Ammanamanchi and\n               Aremu Anuoluwapo and\n               Antoine Bosselut and\n               Khyathi Raghavi Chandu and\n               Miruna{-}Adriana Clinciu and\n               Dipanjan Das and\n               Kaustubh D. Dhole and\n               Wanyu Du and\n               Esin Durmus and\n               Ondrej Dusek and\n               Chris Emezue and\n               Varun Gangal and\n               Cristina Garbacea and\n               Tatsunori Hashimoto and\n               Yufang Hou and\n               Yacine Jernite and\n               Harsh Jhamtani and\n               Yangfeng Ji and\n               Shailza Jolly and\n               Dhruv Kumar and\n               Faisal Ladhak and\n               Aman Madaan and\n               Mounica Maddela and\n               Khyati Mahajan and\n               Saad Mahamood and\n               Bodhisattwa Prasad Majumder and\n               Pedro Henrique Martins and\n               Angelina McMillan{-}Major and\n               Simon Mille and\n               Emiel van Miltenburg and\n               Moin Nadeem and\n               Shashi Narayan and\n               Vitaly Nikolaev and\n               Rubungo Andre Niyongabo and\n               Salomey Osei and\n               Ankur P. Parikh and\n               Laura Perez{-}Beltrachini and\n               Niranjan Ramesh Rao and\n               Vikas Raunak and\n               Juan Diego Rodriguez and\n               Sashank Santhanam and\n               Joao Sedoc and\n               Thibault Sellam and\n               Samira Shaikh and\n               Anastasia Shimorina and\n               Marco Antonio Sobrevilla Cabezudo and\n               Hendrik Strobelt and\n               Nishant Subramani and\n               Wei Xu and\n               Diyi Yang and\n               Akhila Yerukola and\n               Jiawei Zhou},\n  title     = {The {GEM} Benchmark: Natural Language Generation, its Evaluation and\n               Metrics},\n  journal   = {CoRR},\n  volume    = {abs/2102.01672},\n  year      = {2021},\n  url       = {https://arxiv.org/abs/2102.01672},\n  archivePrefix = {arXiv},\n  eprint    = {2102.01672}\n}\n",
+        "homepage": "https://gem-benchmark.github.io/",
+        "license": "CC-BY-SA-4.0",
+        "features": {
+            "gem_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "gem_parent_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "input": [
+                {
+                    "dtype": "string",
+                    "id": null,
+                    "_type": "Value"
+                }
+            ],
+            "target": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "references": [
+                {
+                    "dtype": "string",
+                    "id": null,
+                    "_type": "Value"
+                }
+            ],
+            "category": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            },
+            "webnlg_id": {
+                "dtype": "string",
+                "id": null,
+                "_type": "Value"
+            }
+        },
+        "post_processed": null,
+        "supervised_keys": null,
+        "builder_name": "gem",
+        "config_name": "ru",
+        "version": {
+            "version_str": "1.1.0",
+            "description": null,
+            "major": 1,
+            "minor": 1,
+            "patch": 0
+        },
+        "splits": {
+            "train": {
+                "name": "train",
+                "num_bytes": 6888009,
+                "num_examples": 14630,
+                "dataset_name": "gem"
+            },
+            "validation": {
+                "name": "validation",
+                "num_bytes": 795998,
+                "num_examples": 790,
+                "dataset_name": "gem"
+            },
+            "test": {
+                "name": "test",
+                "num_bytes": 1145282,
+                "num_examples": 1102,
+                "dataset_name": "gem"
+            },
+            "challenge_train_sample": {
+                "name": "challenge_train_sample",
+                "num_bytes": 247089,
+                "num_examples": 501,
+                "dataset_name": "gem"
+            },
+            "challenge_validation_sample": {
+                "name": "challenge_validation_sample",
+                "num_bytes": 514117,
+                "num_examples": 500,
+                "dataset_name": "gem"
+            },
+            "challenge_test_scramble": {
+                "name": "challenge_test_scramble",
+                "num_bytes": 521625,
+                "num_examples": 500,
+                "dataset_name": "gem"
+            }
+        },
+        "download_checksums": {
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_ru_train.json": {
+                "num_bytes": 5724246,
+                "checksum": "bfaa20bd792a34fda25cff766fbabaf12c56c60b898865a2f976cfaad9c04d2e"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_ru_val.json": {
+                "num_bytes": 783342,
+                "checksum": "ac2e74d8618196ccf44be695dbdf4960e1f15dc9a39ebd754a808e793327aafd"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_web_nlg/webnlg_ru_test.json": {
+                "num_bytes": 1123674,
+                "checksum": "24f4282eb6aa8dc424b6b676e1531a730b508e999b2c55d52215e72e4c7ec524"
+            },
+            "https://storage.googleapis.com/huggingface-nlp/datasets/gem/gem_challenge_sets/web_nlg_ru.zip": {
+                "num_bytes": 223583,
+                "checksum": "3d8c6db0a5f941fe897674fd404352fc31b98d50d9492e7cf7f8aed61c69cc21"
+            }
+        },
+        "download_size": 7854845,
+        "post_processing_size": null,
+        "dataset_size": 10112120,
+        "size_in_bytes": 17966965
+    }
+}
