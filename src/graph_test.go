@@ -547,3 +547,57 @@ func pairReducePayloadHasPositiveFloat(t *testing.T, payloads []map[string]inter
 	}
 	return false
 }
+
+// Una pagina filtrata può riempirsi a metà della pagina interna di PAIR_SCAN:
+// il cursore deve riprendere dopo l'ultimo arco consumato, non dopo l'intero blocco.
+func TestGraphQueryFilteredPagination(t *testing.T) {
+	for _, stride := range []int{1, 2} {
+		t.Run(fmt.Sprintf("stride_%d", stride), func(t *testing.T) {
+			db := newAdaptiveTestDB(t, stride, true, 4096)
+			for i := 0; i < 18; i++ {
+				weight := 1
+				if i == 0 {
+					weight = 0
+				}
+				assertCommandPrefix(t, db, fmt.Sprintf("GRAPH_EDGE_SET from=hub to=node%02d type=link weight=%d", i, weight), "SUCCESS")
+			}
+			// Derive expected rows from a single large query so adjacency's encoded
+			// ordering cannot make the test depend on node-name sorting.
+			base := "GRAPH_QUERY MATCH (id='hub')-[:link]->(*) WHERE edge.weight = 1 RETURN edges LIMIT "
+			var want []GraphEdgeRecord
+			decodePayloadField(t, assertCommandPrefix(t, db, base+"64", "SUCCESS"), &want)
+			if len(want) != 17 {
+				t.Fatalf("fixture returned %d edges", len(want))
+			}
+			seen := map[string]bool{}
+			cursor := ""
+			for page := 0; page < 20; page++ {
+				cmd := base + "3"
+				if cursor != "" {
+					cmd += " CURSOR " + cursor
+				}
+				response := assertCommandPrefix(t, db, cmd, "SUCCESS")
+				var got []GraphEdgeRecord
+				decodePayloadField(t, response, &got)
+				for _, edge := range got {
+					if seen[edge.ID] {
+						t.Fatalf("duplicate edge %s", edge.ID)
+					}
+					seen[edge.ID] = true
+				}
+				cursor = responseField(response, "next_cursor")
+				if cursor == "*" {
+					break
+				}
+				if page == 19 {
+					t.Fatal("cursor did not terminate")
+				}
+			}
+			for _, edge := range want {
+				if !seen[edge.ID] {
+					t.Errorf("filtered pagination skipped %s", edge.To)
+				}
+			}
+		})
+	}
+}

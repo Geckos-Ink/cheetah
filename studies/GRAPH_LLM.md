@@ -863,10 +863,13 @@ database itself:
 | Does it admit ignorance? | rate of `matches=0` turns answered as "I don't know" vs answered anyway (the failure that matters most) |
 | Does it grow sanely? | `PAIR_SUMMARY` node count and `GRAPH_DEGREE` on hub entities over time — a hub whose degree grows without new topics means the extractor is duplicating relations |
 
-For a full harness with ranking metrics (ROC-AUC, average precision, precision@k) over a real dataset,
-see [`demo/graph-nell/`](../demo/graph-nell/README.md): it drives a running server over TCP, ingests
-edges in batches, and scores link prediction — the same loop as above with a benchmark instead of a
-conversation.
+For a runnable graph and language-grounding harness, see
+[`demo/graph-web_nlg/`](../demo/graph-web_nlg/README.md). It ingests WebNLG training triples and
+reference sentences, checks graph correctness under concurrent writes, and measures retrieval from
+held-out descriptions while reporting train/evaluation fact overlap explicitly. It exports separate
+extraction and grounded-generation prompts, and scores supplied LLM extractions using exact RDF
+precision/recall/F1. No LLM is invoked automatically; database retrieval metrics alone do not establish
+model quality.
 
 ---
 

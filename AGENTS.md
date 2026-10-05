@@ -9,7 +9,7 @@ counts, probabilities, continuation metadata, context vectors) and later grew gr
 prediction tables, and cluster-fork scheduling.
 
 **Repository layout:** [`src/`](src/) holds the whole server (`package main`, all `*.go` and `*_test.go`
-of the engine); [`gold/`](gold/) and [`demo/graph-nell/`](demo/graph-nell/) are separate `package main`
+of the engine); [`gold/`](gold/) and [`demo/graph-web_nlg/`](demo/graph-web_nlg/) are separate `package main`
 build targets; [`binders/`](binders/) holds **client** libraries for this server, one directory per
 language ([`binders/nodejs/`](binders/nodejs/) and [`binders/python/`](binders/python/) today) — no
 Go, not part of the binary; everything
@@ -30,7 +30,7 @@ editing, and update it in the same change that alters a documented fact (see
   [Vestigial parent-monorepo references](#pitfall-vestigial-references).
 - It is **not** LMDB. The name collision is incidental; there is no `mmap` B-tree here.
 - The [`gold/`](gold/) tree is a teaching prototype, not the shipping engine. The
-  [`demo/graph-nell/`](demo/graph-nell/) tree is a benchmark **client**, not the server.
+  [`demo/graph-web_nlg/`](demo/graph-web_nlg/) tree is a benchmark **client**, not the server.
 
 ---
 
@@ -275,6 +275,11 @@ line is re-encoded into a frame. That is why it needs no edit when a command is 
   ([`graph.go`](src/graph.go)) share the trie with user data. Never emit user keys under these
   prefixes. `GRAPH_QUERY` MUST anchor its left node by ID to stay index-backed
   ([`executeGraphQuery*`](src/graph.go)).
+- **Filtered graph pagination resumes after the last consumed adjacency row.**
+  `graphScanAdjacency` may fill its output partway through an internal trie page after earlier
+  rows were rejected. In that case its cursor is the last returned row's key, not the internal
+  page's end cursor: the latter silently skips matching edges. Regression:
+  `TestGraphQueryFilteredPagination` in [`graph_test.go`](src/graph_test.go), both strides.
 - **The term index is derived, never authoritative.** `\x05gt:<token>/<node>` entries are rebuilt from
   the node records at any time (`GRAPH_TERM_INDEX action=rebuild`) and recall degrades to exact-id
   seeds when they are missing. Node upsert/delete keep them in sync
@@ -455,7 +460,7 @@ client ── TCP ──►  server.go (per-conn loop; text or binary frames)   
 ## Linked source tree and file reference
 
 Every meaningful tracked file has its own subsection. The server sources all live in [`src/`](src/);
-[`gold/`](gold/) and [`demo/graph-nell/`](demo/graph-nell/) are separate build targets covered at the
+[`gold/`](gold/) and [`demo/graph-web_nlg/`](demo/graph-web_nlg/) are separate build targets covered at the
 end. Generated/runtime paths (`cheetah-server`,
 `cheetah_data/…`) are shown in code font without links because they are intentionally untracked.
 
@@ -1008,7 +1013,7 @@ plus a property index.
   `executeGraphQuerySingleHop`, `executeGraphQueryMultiHop` (bounded HOPS + BRANCH_LIMIT + COST_LIMIT),
   and the secondary-index path `graphIndexedEdgeCandidates`/`graphScanIndexedEdgeIDs`.
 - **Tests:** [`graph_test.go`](src/graph_test.go) — lifecycle, parser rules, batch upsert, multi-hop
-  bounds/cost, reverse single hop, property secondary index.
+  bounds/cost, reverse single hop, filtered cursor pagination on both strides, property secondary index.
 - **Common mistakes:** the left node of a `MATCH` must be ID-anchored; wildcard-left queries are
   intentionally rejected to keep execution index-backed. Reverse queries keep that anchor on the left
   and flip the arrow (`(id='x')<-[:t]-(*)`), which means **every direction-dependent branch must
@@ -1408,7 +1413,8 @@ Leveled logging with an in-memory ring buffer feeding `LOG_FLUSH`.
 #### [`src/graph_test.go`](src/graph_test.go)
 
 Unit tests for the graph subsystem: edge lifecycle + query, parser rules, batch upsert (+
-continue-on-error), multi-hop bound/cost, property secondary index, and the three graph reducers.
+continue-on-error), multi-hop bound/cost, filtered cursor pagination on both strides, property
+secondary index, and the three graph reducers.
 Includes the `assertCommandPrefix` / `decodePairReducePayloads` helpers reused for reducer assertions.
 
 #### [`src/graph_recall_test.go`](src/graph_recall_test.go)
@@ -1546,28 +1552,31 @@ value-table + recycle idea. `Read`/`Edit` are stubs ("not fully implemented"). I
 (`go build ./gold`) but is **not** the shipping engine and shares no code with it. Use it as a concept
 reference only; do not implement features here.
 
-#### [`demo/graph-nell/`](demo/graph-nell/)
+#### [`demo/graph-web_nlg/`](demo/graph-web_nlg/)
 
-A benchmark/evaluation **client** (`package main`) that drives a running `cheetah-server` over TCP
-against the NELL dataset. [`main.go`](demo/graph-nell/main.go) ingests edges via `GRAPH_EDGE_SET_BATCH`,
-benchmarks `GRAPH_NEIGHBOR_TYPES`, and scores probability/implicit-correlation prediction quality;
-`run(cfg)` returns the `summaryReport` (so a test can assert on it) while `main` just prints it.
-[`run.sh`](demo/graph-nell/run.sh) and [`README.md`](demo/graph-nell/README.md) document flags;
-`reports/` holds committed JSON/CSV run artifacts. Uses
-[`studies/datasets/bkisiel_aaai10_08m.100.SSFeedback.csv`](studies/datasets/bkisiel_aaai10_08m.100.SSFeedback.csv).
+A dependency-free Go TCP benchmark/validation **client** replacing the NELL demo.
+[`dataset.go`](demo/graph-web_nlg/dataset.go) streams the local English WebNLG exports,
+samples across the full split deterministically, preserves RDF spelling with reversible IDs,
+deduplicates triples, and bounds complete training references on each node. Only training
+entries are ingested; validation/test sentences are held out.
+[`client.go`](demo/graph-web_nlg/client.go) owns bounded socket workers, command deadlines,
+batch acknowledgement checks, and exact node/edge/forward/reverse paged adjacency oracles,
+including filtered hub queries that cross internal page boundaries.
+[`main.go`](demo/graph-web_nlg/main.go) orchestrates ingest, concurrent idempotent rewrites
+with typed readers, checkpoint and revalidation, sentence-driven recall plus bounded top-seed adjacency, reports and LLM
+prompt export. [`evaluation.go`](demo/graph-web_nlg/evaluation.go) scores supplied model
+extractions with exact-triple precision/recall/F1; there are no automatic LLM API calls.
+Retrieval reports training overlap separately from available-fact recall and all-gold recall.
+[`run.sh`](demo/graph-web_nlg/run.sh) forwards CLI flags; reset is opt-in, `--verify-only`
+checks a previously loaded graph after restart. Generated `reports/` are ignored.
 
-[`main_test.go`](demo/graph-nell/main_test.go) adds two layers of coverage: (a) fast, hermetic **unit
-tests** for the evaluation/loader math (`rocAUC`/`averagePrecision`/`precisionAtK`, `buildModels`,
-`splitEdges`, `loadNELLEdges`, `rerankImplicitTopK`, token helpers) that run in the normal `go test`
-sweep, and (b) `TestGraphNELLEndToEnd` — a **real-execution** test gated behind `CHEETAH_NELL_E2E=1`
-that builds the server binary (`go build … cheetahdb/src`), boots it headless on an ephemeral port with an isolated data
-dir, drives the full `run()` pipeline over TCP against a small synthetic NELL dataset, and asserts on
-the returned report plus a direct post-run `GRAPH_QUERY`. Perf note learned here: early NELL edges are
-node-diverse, so ingest is new-node/new-file bound and only speeds up once nodes are reused — keep
-automated runs to a few hundred edges. **The rates originally recorded here (~30–40 edges/s cold,
-~600+ warm) predate the jump-store handle fix** and are no longer representative: the same edge write
-went from 19.4 ms to 0.54 ms on a synthetic benchmark once `jumps.bin`/`index.bin` stopped being
-reopened per operation. Re-measure before quoting a NELL figure.
+[`main_test.go`](demo/graph-web_nlg/main_test.go) covers parsing, sampling, RDF identity,
+deduplication, reference caps, configuration and extraction scoring. `CHEETAH_WEBNLG_E2E=1`
+enables `TestWebNLGEndToEnd`, which builds and boots an isolated server, checks concurrent
+writes, pagination, reverse and two-hop queries, deletion/reinsertion and graceful restart
+persistence on both trie strides. `CHEETAH_WEBNLG_REAL=1` additionally tests the local dataset;
+`CHEETAH_WEBNLG_TRAIN` chooses the real training sample size (default 300, zero means all).
+See [`README.md`](demo/graph-web_nlg/README.md) for workload bounds and metric limitations.
 
 ### Client binders
 
@@ -2217,18 +2226,18 @@ Cross-compile (Windows builds cleanly):
 GOOS=windows go build -o cheetah-server.exe ./src
 ```
 
-Run the NELL graph demo against a **running** server:
+Run the WebNLG graph demo against a **running** server:
 
 ```bash
-go run ./demo/graph-nell --host 127.0.0.1 --port 4455 --database graph_nell_demo --reset-db \
-  --dataset studies/datasets/bkisiel_aaai10_08m.100.SSFeedback.csv
+go run ./demo/graph-web_nlg --addr 127.0.0.1:4455 --database graph_web_nlg_demo --reset-db \
+  --dataset studies/datasets/web_nlg
 ```
 
 Run the automated end-to-end graph pipeline test instead — it builds and boots the server itself
 (no manual server, no big dataset; it generates a small synthetic one) and asserts on the result:
 
 ```bash
-CHEETAH_NELL_E2E=1 go test -run TestGraphNELLEndToEnd -count=1 -v ./demo/graph-nell
+CHEETAH_WEBNLG_E2E=1 go test -run TestWebNLGEndToEnd -count=1 -v ./demo/graph-web_nlg
 ```
 
 Debug: set `CHEETAH_LOG_LEVEL=3` (or `debug`) for command/reducer/trie traces; call `SYSTEM_STATS`
@@ -2279,9 +2288,11 @@ Environment variables read by the server (all verified in-tree):
 - **Benchmark (test only):** `CHEETAHDB_BENCH`, `CHEETAHDB_BENCH_DURATION`,
   `CHEETAHDB_BENCH_WORKERS`, `CHEETAHDB_BENCH_VALUE_SIZE`,
   `CHEETAHDB_BENCH_SHARDED_KEYS`.
-- **Demo end-to-end (test only):** `CHEETAH_NELL_E2E=1` gates
-  [`TestGraphNELLEndToEnd`](demo/graph-nell/main_test.go), which builds + boots the server and drives
-  the demo over TCP. Read by the test harness, **not** by the server.
+- **Demo end-to-end (test only):** `CHEETAH_WEBNLG_E2E=1` gates
+  [`TestWebNLGEndToEnd`](demo/graph-web_nlg/main_test.go), which builds + boots the server and drives
+  the demo over TCP. `CHEETAH_WEBNLG_REAL=1` adds a real dataset slice;
+  `CHEETAH_WEBNLG_TRAIN` selects its size (300 by default, 0 = all). Read by the
+  test harness, **not** by the server.
 
 `DBSLM_*` and `CHEETAH_REDUCE_*`/`CHEETAH_PAIR_REGISTER_*`/`CHEETAH_PREDICT_INHERIT_ASYNC` variables
 seen in old docs are **client-side**; the server does not read them.
@@ -2373,10 +2384,11 @@ seen in old docs are **client-side**; the server does not read them.
 | `DB_LIST` reports effective settings + `ad_hoc_settings` | [`TestDatabaseListReportsSettings`](src/engine_control_test.go) |
 | A database name cannot escape `data_dir` | [`TestDatabaseNameStaysInsideDataDir`](src/engine_control_test.go) |
 | `LOG_FLUSH` answers on one line and leaves the next response aligned | [`TestLogFlush*`](src/logger_test.go) |
+| Filtered graph query pagination never skips unconsumed rows (both strides) | [`TestGraphQueryFilteredPagination`](src/graph_test.go) |
 | Edge-property secondary index | [`TestGraphPropertySecondaryIndexAndPredicate`](src/graph_test.go) |
 | Graph reducers (degree/triangle/pagerank_seed) | [`TestGraphReducersDegreeTriangleAndPageRankSeed`](src/graph_test.go) |
-| Graph-NELL demo eval/loader math (AUC/AP/P@K, models, split, loader) | [`TestRankingMetrics`/`TestBuildModels`/`TestLoadNELLEdges`/…](demo/graph-nell/main_test.go) |
-| End-to-end graph pipeline over TCP (build+boot server, ingest→query→predict, gated) | [`TestGraphNELLEndToEnd`](demo/graph-nell/main_test.go) (`CHEETAH_NELL_E2E=1`) |
+| WebNLG loader/identity/sampling/reference caps and LLM exact extraction metrics | [`TestLoadAndIdentity`/`TestRejectMalformedDatasets`/`TestExtractionScores`/`TestConfigurationBounds`](demo/graph-web_nlg/main_test.go) |
+| End-to-end WebNLG graph validation over TCP (concurrent ingest/rewrite, adjacency paging, recall, delete, restart, both strides) | [`TestWebNLGEndToEnd`](demo/graph-web_nlg/main_test.go) (`CHEETAH_WEBNLG_E2E=1`) |
 | Node binder: response grammar, `value=` to end of line, `x<HEX>` escaping, verbatim cursors; binary transcoding preserves latin1-spelled UTF-8 payload bytes | [`binders/nodejs/test/protocol.test.js`](binders/nodejs/test/protocol.test.js), [`binders/nodejs/test/binary.test.js`](binders/nodejs/test/binary.test.js) (`node --test`) |
 | Node binder: fixed-width hex ordering, integer bucketing and tolerance sweeps | [`binders/nodejs/test/keys.test.js`](binders/nodejs/test/keys.test.js) |
 | Node binder: graph command shapes, recall evidence/merging, detached recall retrieval by id | [`binders/nodejs/test/graph.test.js`](binders/nodejs/test/graph.test.js) |
@@ -2393,18 +2405,18 @@ seen in old docs are **client-side**; the server does not read them.
 | Python binder against a live server (KV, binary, batch, hidden pairs, paging, recall, jobs, reset) | [`binders/python/tests/test_integration.py`](binders/python/tests/test_integration.py) (`CHEETAH_INTEGRATION=1`) |
 
 **Known test gaps:** no focused coverage for prediction-table train/inherit, cluster
-scheduling/gossip, the payload cache, or cursor pagination edge cases. Jump split/promote cycles are
+scheduling/gossip, the payload cache, or remaining cursor pagination edge cases (filtered graph paging is covered). Jump split/promote cycles are
 now exercised indirectly by the randomized overlap tests, not by a targeted unit test. Add tests alongside changes in those areas. The graph subsystem now has both in-process unit
 coverage ([`graph_test.go`](src/graph_test.go)) and a gated real-execution path over TCP
-([`demo/graph-nell/main_test.go`](demo/graph-nell/main_test.go)).
+([`demo/graph-web_nlg/main_test.go`](demo/graph-web_nlg/main_test.go)).
 
 ---
 
 ## Data, security, privacy, and compatibility boundaries
 
 - **Canonical vs. derived:** everything under `cheetah_data/<db>/` is canonical database state written
-  by the engine; the `cheetah-server` binary, benchmark logs, and demo `reports/` are derived. Only
-  `cheetah_data/*` and the binary are `.gitignore`d.
+  by the engine; the `cheetah-server` binary, benchmark logs, and demo `reports/` are derived.
+  `cheetah_data/*`, the binary and WebNLG demo `reports/` are `.gitignore`d.
 - **On-disk compatibility:** the byte formats in [`types.go`](src/types.go) and the `CHPREDTB` prediction
   format are unversioned wire contracts. The pair-node container **is** versioned (`"CHPT"` header +
   `PairFormatVersion`) and pinned per database by `pairs/format.dat` (`"CHPF"`). The main-key mode is

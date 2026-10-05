@@ -53,7 +53,7 @@ other dense analytical slices must be served with predictable latency.
 
 All server sources live in `src/` (`package main`, import path `cheetahdb/src`). The repository root
 holds documentation, `config.example.ini`, `build.sh`, and the two standalone build targets `gold/`
-(reference prototype) and `demo/graph-nell/` (benchmark client).
+(reference prototype) and `demo/graph-web_nlg/` (benchmark client).
 
 - `src/main.go` boots the TCP listener (`0.0.0.0:4455` by default) plus the local CLI and routes commands
   to database handles returned by `engine.GetDatabase(name)`.
@@ -1711,8 +1711,8 @@ runs directly over the `adj/out`/`adj/in` namespaces without hydrating edges. Fo
 argument grammar of every command above, the source of truth is the `handleGraph*` dispatch in
 [`src/graph.go`](src/graph.go) (routed from `ExecuteCommand` in [`src/database.go`](src/database.go)) — this section
 documents that behavior, not a separate spec. A runnable, end-to-end example of the whole language
-(ingest → adjacency → query → predict over TCP) lives in
-[`demo/graph-nell/`](demo/graph-nell/README.md). For worked examples of turning natural-language
+(ingest → concurrent stress → exact graph validation → held-out sentence recall over TCP) lives in
+[`demo/graph-web_nlg/`](demo/graph-web_nlg/README.md). For worked examples of turning natural-language
 sentences into these commands (and back into answers), see
 [Sentences → Graph → Answers](#sentences--graph--answers-llm-recipes).
 

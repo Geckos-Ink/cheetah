@@ -2537,7 +2537,7 @@ func (db *Database) graphScanAdjacency(
 		if len(results) == 0 {
 			return out, nil, nil
 		}
-		for _, res := range results {
+		for index, res := range results {
 			edgePairKey, err := db.readValuePayload(res.Key)
 			if err != nil || len(edgePairKey) == 0 {
 				continue
@@ -2551,6 +2551,11 @@ func (db *Database) graphScanAdjacency(
 			}
 			out = append(out, edge)
 			if len(out) >= limit {
+				// Il filtro può riempire l'output a metà della pagina interna:
+				// ripartire da nextCursor salterebbe i risultati non consumati.
+				if index+1 < len(results) {
+					return out, append([]byte(nil), res.Value...), nil
+				}
 				return out, nextCursor, nil
 			}
 		}

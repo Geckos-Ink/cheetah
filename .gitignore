@@ -43,3 +43,6 @@ go.work.sum
 # .idea/
 # .vscode/
 .DS_Store
+
+# WebNLG benchmark reports and LLM evaluation artifacts are generated.
+demo/graph-web_nlg/reports/
