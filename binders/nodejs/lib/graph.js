@@ -240,6 +240,26 @@ function buildQuery(clause) {
     return `GRAPH_QUERY ${text}`;
 }
 
+/** Structured single-hop query; callers keep each returned edge as provenance. */
+function buildTraversal({ id, type = null, direction = 'out', limit = 16, cursor = null }) {
+    const identifier = (value, label) => {
+        const text = String(value ?? '');
+        // The query parser has no general escaped-identifier grammar. Refuse
+        // delimiters rather than promising JSON quoting can escape them all.
+        if (!text || /[\s\x00-\x1f\x7f'"\\()[\],=<>]/u.test(text)) {
+            throw new CheetahError(`cheetah traversal requires a safe ${label}`);
+        }
+        return text;
+    };
+    const anchor = identifier(id, 'id');
+    const relation = type == null ? '' : `:${identifier(type, 'type')}`;
+    if (!['out', 'in'].includes(direction)) throw new CheetahError('cheetah traversal direction must be out or in');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 256) throw new CheetahError('cheetah traversal limit must be 1..256');
+    const arrow = direction === 'out' ? `-[${relation}]->` : `<-[${relation}]-`;
+    const page = cursor == null || cursor === '*' ? '' : ` CURSOR ${identifier(cursor, 'cursor')}`;
+    return buildQuery(`MATCH (id='${anchor}')${arrow}(*) RETURN edges LIMIT ${limit}${page}`);
+}
+
 // ---------------------------------------------------------------------------
 // Round-trip helpers
 // ---------------------------------------------------------------------------
@@ -710,6 +730,7 @@ module.exports = {
     buildRecall,
     buildSimilar,
     buildTermIndex,
+    buildTraversal,
     degree,
     deleteEdge,
     deleteNode,

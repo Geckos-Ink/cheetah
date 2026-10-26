@@ -143,6 +143,22 @@ test('cheetah binder round-trip', { skip: ENABLED ? false : 'set CHEETAH_INTEGRA
         assert.equal(await new TokenVocabulary(pool).nameFor(tokens[9]), names[9]);
     });
 
+    await t.test('structured traversal returns full edge provenance in both transports', async () => {
+        await graph.setEdge(pool, { from: 'tr:a', to: 'tr:b', type: 'located_in', props: { quote: 'A is located in B.' } });
+        for (const binary of [false, true]) {
+            const conn = new CheetahClient({ port, database, binary });
+            try {
+                const first = await conn.send(graph.buildTraversal({ id: 'tr:a', type: 'located_in' }));
+                assert.equal(first.ok, true, first.raw);
+                const rows = JSON.parse(Buffer.from(first.fields.payload, 'base64').toString());
+                assert.equal(rows[0].props.quote, 'A is located in B.');
+                const reverse = await conn.send(graph.buildTraversal({ id: 'tr:b', direction: 'in' }));
+                assert.equal(reverse.ok, true, reverse.raw);
+                assert.equal(Number(reverse.fields.matches), 1);
+            } finally { await conn.close(); }
+        }
+    });
+
     await t.test('recall finds what several seeds have in common', async () => {
         await graph.setNode(pool, { id: 'mdoc1', labels: ['doc'], props: { title: 'a doc' } });
         await graph.setNode(pool, { id: 'mdoc2', labels: ['doc'] });

@@ -33,6 +33,22 @@ const fieldOf = (line, name) => {
 const decodeField = (line, name) =>
     JSON.parse(Buffer.from(fieldOf(line, name), 'base64').toString('utf8'));
 
+test('structured traversal anchors both directions and preserves paging', () => {
+    assert.equal(graph.buildTraversal({ id: 'entity:a' }),
+        "GRAPH_QUERY MATCH (id='entity:a')-[]->(*) RETURN edges LIMIT 16");
+    assert.equal(graph.buildTraversal({ id: 'entity:b', type: 'located_in', direction: 'in', limit: 4, cursor: 'x0102' }),
+        "GRAPH_QUERY MATCH (id='entity:b')<-[:located_in]-(*) RETURN edges LIMIT 4 CURSOR x0102");
+});
+
+test('structured traversal rejects clause injection and invalid bounds', () => {
+    for (const id of ['', '* ) RETURN edges', "a'b", 'a\nb', 'a\\b', 'a]b']) {
+        assert.throws(() => graph.buildTraversal({ id }), /safe id/);
+    }
+    assert.throws(() => graph.buildTraversal({ id: 'a', type: 't] RETURN nodes' }), /safe type/);
+    assert.throws(() => graph.buildTraversal({ id: 'a', direction: 'both' }), /direction/);
+    for (const limit of [0, 257, 1.5, NaN]) assert.throws(() => graph.buildTraversal({ id: 'a', limit }), /limit/);
+});
+
 test('buildNodeSet encodes labels as a list and props as base64 JSON', () => {
     const line = graph.buildNodeSet({
         id: 'module:parser',

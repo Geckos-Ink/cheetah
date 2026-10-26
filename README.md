@@ -167,6 +167,9 @@ back verbatim) are easy to get subtly wrong. `binders/` holds clients that alrea
   client, KV/graph helpers, key primitives and a subclassable `CheetahDatabase`. See
   [its README](binders/nodejs/README.md).
 
+  `graph.buildTraversal` builds a bounded, id-anchored edge query from structured
+  inputs, including incoming direction and cursors, without constructing a query clause.
+
 ```js
 const { CheetahPool, kv } = require('./binders/nodejs');
 const pool = new CheetahPool({ port: 4455, database: 'app' });

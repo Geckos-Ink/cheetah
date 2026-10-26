@@ -17,6 +17,14 @@ await pool.close();
 
 Requires Node 18+.
 
+`graph.buildTraversal({id, type?, direction: 'out'|'in', limit: 16, cursor?})`
+builds one id-anchored `GRAPH_QUERY` returning full edge records. It accepts only
+delimiter-free identifiers and a limit of 1..256, rejecting clause injection before
+the socket. Omit `type` to discover relations, then traverse a returned endpoint
+in a later call. Keep those individual edges to explain a multi-step answer;
+the server's `RETURN paths` shape contains terminal edge views, not full chains.
+Use `buildQuery(clause)` when intentionally writing the full query language.
+
 ## Layers
 
 Each is usable on its own; higher ones are conveniences over lower ones.

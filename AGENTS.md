@@ -1594,7 +1594,8 @@ free-function command layers — [`lib/kv.js`](binders/nodejs/lib/kv.js) (the tw
 `pairSet`/`pairSummary`/`purgePrefix`/`deleteValue`, batches, scans),
 [`lib/graph.js`](binders/nodejs/lib/graph.js) (the whole `GRAPH_*` surface — nodes with
 `references`, edges single and batched, `neighbors`/`neighborsAll`/`neighborTypes`/`degree`,
-`query`, `recall`/`recallBatched`, id-based `recallAsync`/`fetchRecall`/`awaitRecall`, `similar`,
+`query`, `buildTraversal` (bounded structured single-hop queries, delimiter-validated ids/types),
+`recall`/`recallBatched`, id-based `recallAsync`/`fetchRecall`/`awaitRecall`, `similar`,
 `termIndex`, and the `GRAPH_AMBIGUITY_*` trio),
 [`lib/records.js`](binders/nodejs/lib/records.js) (the `RECORD` family plus `DEL records`, with
 `fieldSpec` validating a field declaration — reserved names included — before the wire, plus
@@ -1631,7 +1632,7 @@ actually spawnable).
   while the server defaults to stopping, so `continue_on_error=1` must travel explicitly. **Any
   change to those on the Go side is a change here too**, and the binder's tests are where a client
   would first notice.
-- **Tests:** `node --test test/*.test.js` from [`binders/nodejs/`](binders/nodejs/) — 143 tests (142 passing + 1 opt-in integration test skipped by default):
+- **Tests:** `node --test test/*.test.js` from [`binders/nodejs/`](binders/nodejs/):
   codec, key primitives, the `GRAPH_*` command spellings
   ([`test/graph.test.js`](binders/nodejs/test/graph.test.js)), the `RECORD` ones
   ([`test/records.test.js`](binders/nodejs/test/records.test.js)), the job/prediction/admin ones
@@ -1639,7 +1640,7 @@ actually spawnable).
   in-memory stand-in that speaks the same line protocol, and the binary codec plus the `ALIAS` layer
   ([`test/binary.test.js`](binders/nodejs/test/binary.test.js)). `CHEETAH_INTEGRATION=1` additionally
   builds the server and round-trips against it (20 subtests, one of them the whole binder driven over
-  a binary connection,
+  a binary connection; structured traversal is checked in both directions and transports,
   [`test/integration.test.js`](binders/nodejs/test/integration.test.js)). These are **not** part of
   `go test ./src`; run them when you change a command's response shape.
 - **A stale root binary silently tests an old protocol.** `ensureServerBinary`
