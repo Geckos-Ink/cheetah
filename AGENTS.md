@@ -1058,6 +1058,18 @@ next query.
   are read only for the items that survive the limit. When equal activations compete for the one
   displayed `via`, choose the lexical seed; map iteration must not make identical recalls differ.
 
+`graphNodeIndexTokens` also indexes scalar strings and string arrays under
+`props.name`, `title`, `aliases`, and `terms`. Property vocabulary has a separate
+20-token allowance, independent of historical id/label/reference capacity, with
+at most 16 values per field and 2048 bytes per value. Unknown properties are not
+searched. Writes, updates, deletion and rebuild all use the same token extractor;
+old data needs a term-index rebuild to gain these derived rows. No on-disk payload
+format changed. `graphSynonymsOf` now ranks/deduplicates peers by edge weight times
+effective confidence and returns at most `seed_limit` peers; seed expansion applies
+that affinity and the synonym decay. Zero-affinity aliases never seed a recall.
+Regression tests: `TestGraphLexicalPropertiesCorrelateOpaqueIDsAndTrackUpdates` and
+`TestGraphSynonymSeedExpansionHonorsConfidenceAndWeight` in `graph_recall_test.go`.
+
 #### [`src/graph_decay.go`](src/graph_decay.go)
 
 Bridges cache evidence and prediction tables into bounded per-hop activation factors without making

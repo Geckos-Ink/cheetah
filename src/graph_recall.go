@@ -64,6 +64,7 @@ const (
 
 	graphRecallMaxIndexTokens    = 12
 	graphRecallMaxReferenceTerms = 20
+	graphRecallMaxPropertyTerms  = 20
 	graphTermCandidateLimit      = 512
 	graphTermRebuildPageSize     = 256
 	graphTermRebuildDefaultLimit = 4096
@@ -226,6 +227,38 @@ func graphNodeIndexTokens(record *GraphNodeRecord) []string {
 			}
 		}
 	}
+	// I nomi leggibili non vanno persi quando l'id è un hash. Solo questi
+	// campi lessicali partecipano: nessuna scansione ricorsiva dei props.
+	beforeProperties := len(out)
+	propertyLimit := beforeProperties + graphRecallMaxPropertyTerms
+	for _, key := range []string{"name", "title", "aliases", "terms"} {
+		var values []string
+		switch value := record.Props[key].(type) {
+		case string:
+			values = []string{value}
+		case []string:
+			values = value[:min(len(value), 16)]
+		case []interface{}:
+			for _, entry := range value[:min(len(value), 16)] {
+				if text, ok := entry.(string); ok {
+					values = append(values, text)
+				}
+			}
+		}
+		for _, text := range values {
+			if len(text) > 2048 {
+				text = text[:2048]
+			}
+			for _, token := range graphRecallTokens(text) {
+				if !appendToken(token, propertyLimit) {
+					break
+				}
+			}
+		}
+	}
+	// I nuovi termini hanno un budget proprio; le frasi mantengono tutto
+	// lo spazio disponibile con il vecchio algoritmo.
+	limit += len(out) - beforeProperties
 	for _, reference := range record.References {
 		for _, token := range graphRecallTokens(reference.Text) {
 			if !appendToken(token, limit) {
@@ -1091,7 +1124,7 @@ func (db *Database) graphResolveRecallTerm(term string, opts *graphRecallOptions
 				return nil, err
 			}
 			for _, synonym := range synonyms {
-				record(synonym, origin.Score*graphRecallSynonymDecay, "synonym")
+				record(synonym.ID, origin.Score*synonym.Score*graphRecallSynonymDecay, "synonym")
 			}
 		}
 	}
@@ -1114,7 +1147,7 @@ func (db *Database) graphResolveRecallTerm(term string, opts *graphRecallOptions
 
 // graphSynonymsOf legge gli archi che dichiarano identità, in entrambi i versi:
 // un alias è tale in tutte e due le direzioni anche quando l'arco è diretto.
-func (db *Database) graphSynonymsOf(nodeID string, opts *graphRecallOptions) ([]string, error) {
+func (db *Database) graphSynonymsOf(nodeID string, opts *graphRecallOptions) ([]graphRecallSeedMatch, error) {
 	if len(opts.SynonymTypes) == 0 {
 		return nil, nil
 	}
@@ -1123,8 +1156,7 @@ func (db *Database) graphSynonymsOf(nodeID string, opts *graphRecallOptions) ([]
 		types = append(types, name)
 	}
 	sort.Strings(types)
-	out := make([]string, 0, 4)
-	seen := make(map[string]struct{}, 4)
+	best := make(map[string]float64)
 	for _, edgeType := range types {
 		for _, direction := range []string{"out", "in"} {
 			var prefix []byte
@@ -1145,13 +1177,26 @@ func (db *Database) graphSynonymsOf(nodeID string, opts *graphRecallOptions) ([]
 				if peer == "" || peer == nodeID {
 					continue
 				}
-				if _, ok := seen[peer]; ok {
-					continue
+				// Un sinonimo escluso o debole non deve diventare un seme
+				// certo: usa la stessa affinità della diffusione ordinaria.
+				if affinity := graphRecallAffinity(&edges[i]); affinity > best[peer] {
+					best[peer] = affinity
 				}
-				seen[peer] = struct{}{}
-				out = append(out, peer)
 			}
 		}
+	}
+	out := make([]graphRecallSeedMatch, 0, len(best))
+	for id, affinity := range best {
+		out = append(out, graphRecallSeedMatch{ID: id, Score: affinity, Match: "synonym"})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Score == out[j].Score {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Score > out[j].Score
+	})
+	if len(out) > opts.SeedLimit {
+		out = out[:opts.SeedLimit]
 	}
 	return out, nil
 }

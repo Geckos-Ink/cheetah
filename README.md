@@ -36,6 +36,14 @@ other dense analytical slices must be served with predictable latency.
   declared synonym edges; cache hit rates adapt decay per query shape, while the optional
   `graph_recall_decay` prediction table learns a different carry rate per relation. `GRAPH_SIMILAR`
   answers the sibling question, "what else behaves like this".
+  Names stored under `props.name`/`title` and string aliases/search cues under
+  `props.aliases`/`terms` also feed that index, so opaque node ids remain searchable.
+  These fields have a separate 20-token budget (up to 16 values per field,
+  first 2048 bytes per value); arbitrary properties are not indexed. Existing
+  databases need `GRAPH_TERM_INDEX action=rebuild` to index previously stored
+  properties. Declared synonym expansion respects edge weight and confidence;
+  zero-confidence or zero-weight aliases cannot become active seeds. Related
+  words are search cues, not proof of factual identity.
 - **Payload caching.** `src/database.go` keeps a bounded cache (defaults: 16k entries ≈64 MB) keyed by
   `<value_size, table_id, entry_id>` so hot payloads never hit disk. Tune it with
   `CHEETAH_PAYLOAD_CACHE_ENTRIES`, `CHEETAH_PAYLOAD_CACHE_MB`, or

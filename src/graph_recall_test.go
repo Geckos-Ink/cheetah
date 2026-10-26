@@ -72,6 +72,64 @@ func encodeGraphReferences(t *testing.T, references []GraphReferenceSentence) st
 	return base64.StdEncoding.EncodeToString(payload)
 }
 
+func TestGraphLexicalPropertiesCorrelateOpaqueIDsAndTrackUpdates(t *testing.T) {
+	db := newRecallTestDB(t)
+	set := func(id string, props map[string]interface{}) {
+		data, err := json.Marshal(props)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertCommandPrefix(t, db, "GRAPH_NODE_SET id="+id+" props="+base64.StdEncoding.EncodeToString(data), "SUCCESS")
+	}
+	set("opaque:7df4", map[string]interface{}{"name": "Marine constructor", "aliases": []string{"shipwright"}, "terms": []string{"vessel fabrication"}, "private": "neverindexed"})
+	set("opaque:9ac2", map[string]interface{}{"name": "River vessel"})
+	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=opaque:7df4 to=opaque:9ac2 type=builds", "SUCCESS")
+	for _, term := range []string{"constructor", "shipwright", "fabrication"} {
+		p := recallPayload(t, assertCommandPrefix(t, db, "GRAPH_RECALL seeds="+term+" hops=1 precision=0.1 include_seeds=1 cache=off", "SUCCESS"))
+		if _, ok := findAssociation(p, "opaque:7df4"); !ok {
+			t.Fatalf("property term %q lost opaque node: %+v", term, p)
+		}
+	}
+	if ids, _ := db.graphTermCandidates("neverindexed", 8); len(ids) != 0 {
+		t.Fatal("arbitrary properties must not be indexed")
+	}
+	set("opaque:7df4", map[string]interface{}{"name": "Marine constructor", "aliases": []string{"boatbuilder"}})
+	if ids, _ := db.graphTermCandidates("shipwright", 8); len(ids) != 0 {
+		t.Fatal("old alias remains indexed")
+	}
+	assertCommandPrefix(t, db, "GRAPH_TERM_INDEX action=drop", "SUCCESS")
+	assertCommandPrefix(t, db, "GRAPH_TERM_INDEX action=rebuild", "SUCCESS")
+	if ids, _ := db.graphTermCandidates("boatbuilder", 8); len(ids) != 1 {
+		t.Fatal("rebuild lost lexical properties")
+	}
+	assertCommandPrefix(t, db, "GRAPH_NODE_DEL id=opaque:7df4 cascade=1", "SUCCESS")
+	if ids, _ := db.graphTermCandidates("boatbuilder", 8); len(ids) != 0 {
+		t.Fatal("deleted alias remains indexed")
+	}
+}
+
+func TestGraphSynonymSeedExpansionHonorsConfidenceAndWeight(t *testing.T) {
+	db := newRecallTestDB(t)
+	for _, id := range []string{"term:builder", "term:constructor", "term:unrelated", "term:inactive"} {
+		assertCommandPrefix(t, db, "GRAPH_NODE_SET id="+id, "SUCCESS")
+	}
+	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=term:builder to=term:constructor type=synonym weight=0.8 confidence=0.5", "SUCCESS")
+	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=term:builder to=term:unrelated type=synonym confidence=0", "SUCCESS")
+	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=term:builder to=term:inactive type=alias weight=0", "SUCCESS")
+	p := recallPayload(t, assertCommandPrefix(t, db, "GRAPH_RECALL seeds=term:builder expand=exact,synonym precision=0.01 hops=1 include_seeds=1 cache=off", "SUCCESS"))
+	for _, match := range p.Seeds[0].Matches {
+		if match.ID == "term:unrelated" || match.ID == "term:inactive" {
+			t.Fatalf("excluded alias became a seed: %+v", match)
+		}
+		if match.ID == "term:constructor" && (match.Score < 0.379 || match.Score > 0.381) {
+			t.Fatalf("expected weighted synonym score .38, got %+v", match)
+		}
+	}
+	if a, ok := findAssociation(p, "term:constructor"); !ok || a.Score >= 0.96 {
+		t.Fatalf("synonym confidence was ignored: %+v", p)
+	}
+}
+
 func TestGraphNodeReferencesRoundTripAndFeedTheTermIndex(t *testing.T) {
 	db := newRecallTestDB(t)
 	references := encodeGraphReferences(t, []GraphReferenceSentence{
