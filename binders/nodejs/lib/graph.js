@@ -237,6 +237,7 @@ function buildTermIndex({ action = 'stats', limit = null, cursor = null } = {}) 
 function buildQuery(clause) {
     const text = String(clause || '').trim();
     if (!text) throw new CheetahError('cheetah GRAPH_QUERY requires a MATCH clause');
+    if (/[\r\n]/u.test(text)) throw new CheetahError('cheetah GRAPH_QUERY requires one line');
     return `GRAPH_QUERY ${text}`;
 }
 
@@ -452,7 +453,7 @@ async function degree(conn, { id, direction = 'out', type = null, weighted = fal
     };
 }
 
-/** Run one `MATCH` clause. `payload` shape follows the `RETURN` mode. */
+/** Run a graph clause (including JOIN/GROUP BY/INCLUDE/EXCLUDE). Payload follows RETURN. */
 async function query(conn, clause) {
     const response = await commandOrThrow(conn, buildQuery(clause), 'GRAPH_QUERY');
     return {

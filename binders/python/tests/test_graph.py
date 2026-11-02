@@ -8,6 +8,7 @@ import unittest
 
 from cheetah_db import graph
 from cheetah_db.client import CheetahError
+from cheetah_db.protocol import parse_response
 
 from .fakes import FakeConnection
 
@@ -55,6 +56,25 @@ class EncodingTests(unittest.TestCase):
 
     def test_degree_of_an_unwritten_node_is_zero(self) -> None:
         self.assertEqual(graph.degree(self.conn, "n:absent")["degree"], 0)
+
+    def test_relational_query_preserves_literal_whitespace_and_grouped_payload(self) -> None:
+        clause = "MATCH (id='a')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE edge.props.name <> 'two  spaces' GROUP BY join1.to.id RETURN groups"
+        groups = [{"key": {"join1.to.id": "org"}, "count": 2, "weight_sum": 1.5}]
+        payload = base64.b64encode(json.dumps(groups).encode()).decode()
+        lines = []
+
+        class Connection:
+            def send(self, line):
+                lines.append(line)
+                return parse_response(f"SUCCESS,return=groups,matches=1,next_cursor=*,payload={payload}")
+
+        result = graph.query(Connection(), clause)
+        self.assertEqual(lines, [f"GRAPH_QUERY {clause}"])
+        self.assertEqual(result["return"], "groups")
+        self.assertEqual(result["payload"], groups)
+        for separator in ("\n", "\r"):
+            with self.assertRaises(CheetahError):
+                graph.query(Connection(), f"MATCH{separator}(id='a')")
 
 
 class RecallTests(unittest.TestCase):

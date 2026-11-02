@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,10 +76,12 @@ type GraphEdgeRecord struct {
 type graphQueryReturnMode string
 
 const (
-	graphReturnEdges graphQueryReturnMode = "edges"
-	graphReturnNodes graphQueryReturnMode = "nodes"
-	graphReturnPaths graphQueryReturnMode = "paths"
-	graphReturnCount graphQueryReturnMode = "count"
+	graphReturnEdges  graphQueryReturnMode = "edges"
+	graphReturnNodes  graphQueryReturnMode = "nodes"
+	graphReturnPaths  graphQueryReturnMode = "paths"
+	graphReturnCount  graphQueryReturnMode = "count"
+	graphReturnRows   graphQueryReturnMode = "rows"
+	graphReturnGroups graphQueryReturnMode = "groups"
 )
 
 type graphQueryNodePattern struct {
@@ -90,30 +91,31 @@ type graphQueryNodePattern struct {
 }
 
 type graphQueryPredicate struct {
-	Scope       string
-	Field       string
-	Op          string
-	PropPath    []string
-	StringValue string
-	NumberValue float64
-	IsNumber    bool
-	BoolValue   bool
-	IsBool      bool
+	graphQueryField
+	Op     string
+	Values []graphQueryLiteral
 }
 
 type graphQueryPlan struct {
-	Direction   string
-	EdgeType    string
-	Left        graphQueryNodePattern
-	Right       graphQueryNodePattern
-	Where       []graphQueryPredicate
-	MinHops     int
-	MaxHops     int
-	BranchLimit int
-	CostLimit   float64
-	Return      graphQueryReturnMode
-	Limit       int
-	Cursor      []byte
+	Direction     string
+	EdgeType      string
+	Left          graphQueryNodePattern
+	Right         graphQueryNodePattern
+	Where         []graphQueryPredicate
+	MinHops       int
+	MaxHops       int
+	BranchLimit   int
+	CostLimit     float64
+	Return        graphQueryReturnMode
+	Limit         int
+	Cursor        []byte
+	Filter        *graphQueryExpr
+	Relations     []graphQueryRelation
+	GroupBy       []graphQueryField
+	IncludeFields []string
+	ExcludeFields []string
+	Budget        int
+	CacheOff      bool
 }
 
 type graphPathView struct {
@@ -183,8 +185,6 @@ type graphBatchError struct {
 	Index int    `json:"index"`
 	Error string `json:"error"`
 }
-
-var graphWherePredicatePattern = regexp.MustCompile(`(?i)^(from|to|edge)\.([a-z0-9_.]+)\s*(=|!=|>=|<=|>|<)\s*(.+)$`)
 
 func (db *Database) handleGraphNodeSet(args string) (string, error) {
 	params := parseKeyValueArgs(args)
@@ -851,7 +851,10 @@ func (db *Database) handleGraphQuery(args string) (string, error) {
 	}
 	plan, err := parseGraphQuery(query)
 	if err != nil {
-		return fmt.Sprintf("ERROR,graph_query_parse_failed:%v", err), nil
+		return "ERROR,graph_query_parse_failed:" + strings.NewReplacer("\r", "\\r", "\n", "\\n").Replace(err.Error()), nil
+	}
+	if plan.MaxHops == 1 {
+		return db.executeGraphRelationalQuery(plan)
 	}
 	edges, nextCursor, err := db.executeGraphQuery(plan)
 	if err != nil {
@@ -923,71 +926,9 @@ func (db *Database) executeGraphQuery(plan *graphQueryPlan) ([]GraphEdgeRecord, 
 		return nil, nil, fmt.Errorf("cursor_not_supported_for_multihop")
 	}
 	if plan.MaxHops <= 1 {
-		return db.executeGraphQuerySingleHop(plan)
+		return nil, nil, fmt.Errorf("single_hop_uses_streaming_executor")
 	}
 	return db.executeGraphQueryMultiHop(plan)
-}
-
-func (db *Database) executeGraphQuerySingleHop(plan *graphQueryPlan) ([]GraphEdgeRecord, []byte, error) {
-	limit := graphNormalizeLimit(plan.Limit)
-	edgeType := plan.EdgeType
-	var prefix []byte
-	var rightIDFilter string
-	candidateSet, hasIndexFilter, err := db.graphIndexedEdgeCandidates(plan.Where)
-	if err != nil {
-		return nil, nil, err
-	}
-	if hasIndexFilter && len(candidateSet) == 0 {
-		return nil, nil, nil
-	}
-	switch plan.Direction {
-	case "out":
-		prefix = graphAdjOutScanPrefix(plan.Left.ID, edgeType)
-		rightIDFilter = plan.Right.ID
-	case "in":
-		prefix = graphAdjInScanPrefix(plan.Left.ID, edgeType)
-		rightIDFilter = plan.Right.ID
-	default:
-		return nil, nil, fmt.Errorf("invalid_direction")
-	}
-	nodeCache := map[string]*GraphNodeRecord{}
-	filter := func(edge *GraphEdgeRecord) bool {
-		if edge == nil {
-			return false
-		}
-		if hasIndexFilter {
-			if _, ok := candidateSet[edge.ID]; !ok {
-				return false
-			}
-		}
-		if rightIDFilter != "" {
-			if plan.Direction == "out" && edge.To != rightIDFilter {
-				return false
-			}
-			if plan.Direction == "in" && edge.From != rightIDFilter {
-				return false
-			}
-		}
-		// Il pattern è posizionale: su `in` l'ancora è il `to` dell'arco.
-		leftNodeID, rightNodeID := edge.From, edge.To
-		if plan.Direction == "in" {
-			leftNodeID, rightNodeID = edge.To, edge.From
-		}
-		if !db.graphMatchNodePattern(leftNodeID, plan.Left, nodeCache) {
-			return false
-		}
-		if !db.graphMatchNodePattern(rightNodeID, plan.Right, nodeCache) {
-			return false
-		}
-		for _, pred := range plan.Where {
-			ok, err := db.graphEvaluatePredicate(edge, pred, nodeCache)
-			if err != nil || !ok {
-				return false
-			}
-		}
-		return true
-	}
-	return db.graphScanAdjacency(prefix, limit, plan.Cursor, filter)
 }
 
 type graphTraversalState struct {
@@ -998,7 +939,7 @@ type graphTraversalState struct {
 }
 
 type graphTraversalCandidate struct {
-	Edge     GraphEdgeRecord
+	Weight   float64
 	NextNode string
 	NextCost float64
 }
@@ -1008,18 +949,16 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 	if limit <= 0 {
 		limit = graphDefaultLimit
 	}
-	candidateSet, hasIndexFilter, err := db.graphIndexedEdgeCandidates(plan.Where)
+	exec := newGraphQueryExecution(db, plan)
+	ok, err := exec.matchNode(plan.Left.ID, plan.Left)
 	if err != nil {
 		return nil, nil, err
 	}
-	if hasIndexFilter && len(candidateSet) == 0 {
-		return nil, nil, nil
-	}
-	nodeCache := map[string]*GraphNodeRecord{}
-	if !db.graphMatchNodePattern(plan.Left.ID, plan.Left, nodeCache) {
+	if !ok {
 		return nil, nil, nil
 	}
 	results := make([]GraphEdgeRecord, 0, limit)
+	outputBytes := 0
 	seenTerminal := make(map[string]struct{}, limit*2)
 	queue := make([]graphTraversalState, 0, graphDefaultLimit)
 	queue = append(queue, graphTraversalState{
@@ -1031,6 +970,7 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 
 	for len(queue) > 0 && len(results) < limit {
 		state := queue[0]
+		queue[0] = graphTraversalState{}
 		queue = queue[1:]
 		if state.Hops >= plan.MaxHops {
 			continue
@@ -1044,21 +984,11 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 		if branchFetch < graphDefaultScanPage {
 			branchFetch = graphDefaultScanPage
 		}
-		edges, _, err := db.graphScanAdjacency(adjPrefix, branchFetch, nil, nil)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(edges) == 0 {
-			continue
-		}
-
-		candidates := make([]graphTraversalCandidate, 0, len(edges))
-		for _, edge := range edges {
-			if hasIndexFilter {
-				if _, ok := candidateSet[edge.ID]; !ok {
-					continue
-				}
-			}
+		candidates := make([]graphTraversalCandidate, 0, plan.BranchLimit)
+		consumed := 0
+		_, err := exec.scan(adjPrefix, nil, func(edge GraphEdgeRecord, _ []byte) (bool, error) {
+			consumed++
+			more := consumed < branchFetch
 			nextNode := edge.To
 			if plan.Direction == "in" {
 				nextNode = edge.From
@@ -1066,48 +996,53 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 			nextHops := state.Hops + 1
 			stepCost := graphEdgeTraversalCost(edge.Weight)
 			if math.IsInf(stepCost, 1) {
-				continue
+				return more, nil
 			}
 			nextCost := state.Cost + stepCost
 			if plan.CostLimit > 0 && nextCost > plan.CostLimit {
-				continue
+				return more, nil
 			}
-
-			edgePassesWhere := true
-			for _, pred := range plan.Where {
-				ok, predErr := db.graphEvaluatePredicate(&edge, pred, nodeCache)
-				if predErr != nil || !ok {
-					edgePassesWhere = false
-					break
-				}
+			ok, err := exec.matches(plan.Filter, []*GraphEdgeRecord{&edge})
+			if err != nil || !ok {
+				return more, err
 			}
-			if !edgePassesWhere {
-				continue
-			}
-
 			if nextHops >= plan.MinHops {
-				if db.graphMatchNodePattern(nextNode, plan.Right, nodeCache) {
+				ok, err := exec.matchNode(nextNode, plan.Right)
+				if err != nil {
+					return false, err
+				}
+				if ok {
 					terminalKey := fmt.Sprintf("%s|%d", edge.ID, nextHops)
 					if _, exists := seenTerminal[terminalKey]; !exists {
 						seenTerminal[terminalKey] = struct{}{}
-						results = append(results, edge)
+						retained := edge
+						if plan.Return != graphReturnEdges {
+							retained = GraphEdgeRecord{From: edge.From, To: edge.To, Type: edge.Type, Weight: edge.Weight}
+						}
+						raw, err := json.Marshal(retained)
+						if err != nil {
+							return false, err
+						}
+						outputBytes += len(raw)
+						if outputBytes > graphQueryMaxOutputBytes {
+							return false, fmt.Errorf("graph_query_output_capacity_exceeded")
+						}
+						results = append(results, retained)
 						if len(results) >= limit {
-							break
+							return false, nil
 						}
 					}
 				}
 			}
-
 			if nextHops < plan.MaxHops {
-				if _, seen := state.Visited[nextNode]; seen {
-					continue
+				if _, seen := state.Visited[nextNode]; !seen {
+					candidates = append(candidates, graphTraversalCandidate{Weight: edge.Weight, NextNode: nextNode, NextCost: nextCost})
 				}
-				candidates = append(candidates, graphTraversalCandidate{
-					Edge:     edge,
-					NextNode: nextNode,
-					NextCost: nextCost,
-				})
 			}
+			return more, nil
+		})
+		if err != nil {
+			return nil, nil, err
 		}
 		if len(results) >= limit {
 			break
@@ -1117,18 +1052,21 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 			continue
 		}
 		sort.Slice(candidates, func(i, j int) bool {
-			if candidates[i].Edge.Weight == candidates[j].Edge.Weight {
+			if candidates[i].Weight == candidates[j].Weight {
 				if candidates[i].NextCost == candidates[j].NextCost {
 					return candidates[i].NextNode < candidates[j].NextNode
 				}
 				return candidates[i].NextCost < candidates[j].NextCost
 			}
-			return candidates[i].Edge.Weight > candidates[j].Edge.Weight
+			return candidates[i].Weight > candidates[j].Weight
 		})
 		if len(candidates) > plan.BranchLimit {
 			candidates = candidates[:plan.BranchLimit]
 		}
 		for _, cand := range candidates {
+			if len(queue) >= graphQueryMaxFrontier {
+				return nil, nil, fmt.Errorf("graph_query_frontier_exceeded")
+			}
 			nextVisited := make(map[string]struct{}, len(state.Visited)+1)
 			for key := range state.Visited {
 				nextVisited[key] = struct{}{}
@@ -1143,196 +1081,6 @@ func (db *Database) executeGraphQueryMultiHop(plan *graphQueryPlan) ([]GraphEdge
 		}
 	}
 	return results, nil, nil
-}
-
-func parseGraphQuery(raw string) (*graphQueryPlan, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil, fmt.Errorf("empty_query")
-	}
-	if !graphHasPrefixFold(trimmed, "MATCH ") {
-		return nil, fmt.Errorf("query_must_start_with_MATCH")
-	}
-	idx := len("MATCH")
-	idx = graphSkipSpaces(trimmed, idx)
-	leftNodeRaw, nextIdx, err := graphExtractGroup(trimmed, idx, '(', ')')
-	if err != nil {
-		return nil, err
-	}
-	leftNode, err := parseGraphQueryNodePattern(leftNodeRaw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid_left_node:%w", err)
-	}
-	idx = graphSkipSpaces(trimmed, nextIdx)
-	direction := ""
-	edgeRaw := ""
-	switch {
-	case strings.HasPrefix(trimmed[idx:], "-["):
-		direction = "out"
-		edgeEnd := strings.Index(trimmed[idx+2:], "]")
-		if edgeEnd < 0 {
-			return nil, fmt.Errorf("unterminated_edge_pattern")
-		}
-		edgeRaw = trimmed[idx+2 : idx+2+edgeEnd]
-		idx = idx + 2 + edgeEnd + 1
-		idx = graphSkipSpaces(trimmed, idx)
-		if !strings.HasPrefix(trimmed[idx:], "->") {
-			return nil, fmt.Errorf("expected_outgoing_arrow")
-		}
-		idx += 2
-	case strings.HasPrefix(trimmed[idx:], "<-["):
-		direction = "in"
-		edgeEnd := strings.Index(trimmed[idx+3:], "]")
-		if edgeEnd < 0 {
-			return nil, fmt.Errorf("unterminated_edge_pattern")
-		}
-		edgeRaw = trimmed[idx+3 : idx+3+edgeEnd]
-		idx = idx + 3 + edgeEnd + 1
-		idx = graphSkipSpaces(trimmed, idx)
-		if !strings.HasPrefix(trimmed[idx:], "-") {
-			return nil, fmt.Errorf("expected_incoming_arrow_tail")
-		}
-		idx++
-	default:
-		return nil, fmt.Errorf("expected_edge_pattern")
-	}
-	idx = graphSkipSpaces(trimmed, idx)
-	rightNodeRaw, nextIdx, err := graphExtractGroup(trimmed, idx, '(', ')')
-	if err != nil {
-		return nil, err
-	}
-	rightNode, err := parseGraphQueryNodePattern(rightNodeRaw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid_right_node:%w", err)
-	}
-	edgeType, err := parseGraphQueryEdgePattern(edgeRaw)
-	if err != nil {
-		return nil, fmt.Errorf("invalid_edge_pattern:%w", err)
-	}
-	idx = nextIdx
-	plan := &graphQueryPlan{
-		Direction:   direction,
-		EdgeType:    edgeType,
-		Left:        leftNode,
-		Right:       rightNode,
-		MinHops:     graphDefaultMinHops,
-		MaxHops:     graphDefaultMaxHops,
-		BranchLimit: graphDefaultBranch,
-		CostLimit:   0,
-		Return:      graphReturnEdges,
-		Limit:       graphDefaultLimit,
-	}
-
-	rest := strings.TrimSpace(trimmed[idx:])
-	if rest != "" {
-		// Clause order is fixed for deterministic parsing and execution planning.
-		whereClause, afterWhere, err := graphConsumeClause(
-			rest,
-			"WHERE",
-			[]string{"HOPS", "BRANCH_LIMIT", "BRANCH", "COST_LIMIT", "COST", "RETURN", "LIMIT", "CURSOR"},
-		)
-		if err != nil {
-			return nil, err
-		}
-		if whereClause != "" {
-			preds, err := parseGraphWhereClause(whereClause)
-			if err != nil {
-				return nil, err
-			}
-			plan.Where = preds
-		}
-		rest = afterWhere
-
-		hopsClause, afterHops, err := graphConsumeClause(rest, "HOPS", []string{"BRANCH_LIMIT", "BRANCH", "COST_LIMIT", "COST", "RETURN", "LIMIT", "CURSOR"})
-		if err != nil {
-			return nil, err
-		}
-		if hopsClause != "" {
-			minHops, maxHops, err := parseGraphHopBounds(hopsClause)
-			if err != nil {
-				return nil, err
-			}
-			plan.MinHops = minHops
-			plan.MaxHops = maxHops
-		}
-		rest = afterHops
-
-		branchClause, afterBranch, err := graphConsumeAnyClause(rest, []string{"BRANCH_LIMIT", "BRANCH"}, []string{"COST_LIMIT", "COST", "RETURN", "LIMIT", "CURSOR"})
-		if err != nil {
-			return nil, err
-		}
-		if branchClause != "" {
-			branchLimit, err := strconv.Atoi(strings.TrimSpace(branchClause))
-			if err != nil {
-				return nil, fmt.Errorf("invalid_branch_limit")
-			}
-			plan.BranchLimit = graphNormalizeBranchLimit(branchLimit)
-		}
-		rest = afterBranch
-
-		costClause, afterCost, err := graphConsumeAnyClause(rest, []string{"COST_LIMIT", "COST"}, []string{"RETURN", "LIMIT", "CURSOR"})
-		if err != nil {
-			return nil, err
-		}
-		if costClause != "" {
-			costLimit, err := strconv.ParseFloat(strings.TrimSpace(costClause), 64)
-			if err != nil {
-				return nil, fmt.Errorf("invalid_cost_limit")
-			}
-			if costLimit < 0 || math.IsNaN(costLimit) || math.IsInf(costLimit, 0) {
-				return nil, fmt.Errorf("invalid_cost_limit")
-			}
-			plan.CostLimit = costLimit
-		}
-		rest = afterCost
-
-		returnClause, afterReturn, err := graphConsumeClause(rest, "RETURN", []string{"LIMIT", "CURSOR"})
-		if err != nil {
-			return nil, err
-		}
-		if returnClause != "" {
-			mode, err := parseGraphReturnMode(returnClause)
-			if err != nil {
-				return nil, err
-			}
-			plan.Return = mode
-		}
-		rest = afterReturn
-
-		limitClause, afterLimit, err := graphConsumeClause(rest, "LIMIT", []string{"CURSOR"})
-		if err != nil {
-			return nil, err
-		}
-		if limitClause != "" {
-			limit, err := strconv.Atoi(strings.TrimSpace(limitClause))
-			if err != nil {
-				return nil, fmt.Errorf("invalid_limit")
-			}
-			plan.Limit = graphNormalizeLimit(limit)
-		}
-		rest = afterLimit
-
-		cursorClause, afterCursor, err := graphConsumeClause(rest, "CURSOR", nil)
-		if err != nil {
-			return nil, err
-		}
-		if cursorClause != "" {
-			cursor, err := graphParseCursorToken(strings.TrimSpace(cursorClause))
-			if err != nil {
-				return nil, fmt.Errorf("invalid_cursor")
-			}
-			plan.Cursor = cursor
-		}
-		rest = strings.TrimSpace(afterCursor)
-		if rest != "" {
-			return nil, fmt.Errorf("unexpected_tokens_after_query:%s", rest)
-		}
-	}
-
-	if plan.Left.Wildcard || plan.Left.ID == "" {
-		return nil, fmt.Errorf("left_node_must_be_anchored_by_id")
-	}
-	return plan, nil
 }
 
 func parseGraphQueryNodePattern(raw string) (graphQueryNodePattern, error) {
@@ -1372,8 +1120,8 @@ func parseGraphQueryNodePattern(raw string) (graphQueryNodePattern, error) {
 			return pattern, fmt.Errorf("unsupported_node_field:%s", key)
 		}
 	}
-	if pattern.ID == "" {
-		return pattern, fmt.Errorf("node_id_required")
+	if pattern.ID == "" && pattern.Label == "" {
+		return pattern, fmt.Errorf("node_id_or_label_required")
 	}
 	return pattern, nil
 }
@@ -1394,142 +1142,6 @@ func parseGraphQueryEdgePattern(raw string) (string, error) {
 	return graphNormalizeEdgeType(value), nil
 }
 
-func parseGraphWhereClause(raw string) ([]graphQueryPredicate, error) {
-	parts, err := graphSplitByAND(raw)
-	if err != nil {
-		return nil, err
-	}
-	if len(parts) == 0 {
-		return nil, fmt.Errorf("empty_where_clause")
-	}
-	preds := make([]graphQueryPredicate, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		matches := graphWherePredicatePattern.FindStringSubmatch(part)
-		if len(matches) != 5 {
-			return nil, fmt.Errorf("invalid_predicate:%s", part)
-		}
-		scope := strings.ToLower(matches[1])
-		fieldExprRaw := strings.TrimSpace(matches[2])
-		fieldExpr := strings.ToLower(fieldExprRaw)
-		op := matches[3]
-		literal := strings.TrimSpace(matches[4])
-		pred := graphQueryPredicate{
-			Scope: scope,
-			Op:    op,
-		}
-		switch scope {
-		case "edge":
-			switch {
-			case fieldExpr == "type":
-				pred.Field = "type"
-				if op != "=" && op != "!=" {
-					return nil, fmt.Errorf("string_predicates_only_support_equal_or_not_equal")
-				}
-				pred.StringValue = graphUnquote(literal)
-			case fieldExpr == "weight":
-				pred.Field = "weight"
-				value, err := strconv.ParseFloat(graphUnquote(literal), 64)
-				if err != nil {
-					return nil, fmt.Errorf("invalid_weight_predicate")
-				}
-				pred.IsNumber = true
-				pred.NumberValue = value
-			case fieldExpr == "confidence":
-				// Accetta indifferentemente il numero o la parola della scala.
-				pred.Field = "confidence"
-				value, _, err := graphParseConfidenceToken(graphUnquote(literal))
-				if err != nil {
-					return nil, fmt.Errorf("invalid_confidence_predicate")
-				}
-				pred.IsNumber = true
-				pred.NumberValue = value
-			case fieldExpr == "modality":
-				// `=`/`!=` confrontano la parola, gli operatori d'ordine il suo rango.
-				pred.Field = "modality"
-				level, ok := graphModalityByName(graphUnquote(literal))
-				if !ok {
-					return nil, fmt.Errorf("unknown_modality:%s", literal)
-				}
-				pred.StringValue = level.Name
-				pred.NumberValue = float64(level.Rank)
-			case fieldExpr == "ambiguity" || fieldExpr == "oneof":
-				pred.Field = "ambiguity"
-				if op != "=" && op != "!=" {
-					return nil, fmt.Errorf("string_predicates_only_support_equal_or_not_equal")
-				}
-				pred.StringValue = graphUnquote(literal)
-			case strings.HasPrefix(fieldExpr, "props."):
-				pred.Field = "prop"
-				propPath := fieldExprRaw[len("props."):]
-				segments := graphNormalizePropertyPath(propPath)
-				if len(segments) == 0 {
-					return nil, fmt.Errorf("invalid_property_predicate")
-				}
-				pred.PropPath = segments
-				if op == ">" || op == ">=" || op == "<" || op == "<=" {
-					value, err := strconv.ParseFloat(graphUnquote(literal), 64)
-					if err != nil {
-						return nil, fmt.Errorf("invalid_property_numeric_predicate")
-					}
-					pred.IsNumber = true
-					pred.NumberValue = value
-				} else {
-					parsedTypedLiteral := false
-					if !graphIsQuotedLiteral(literal) {
-						if value, err := strconv.ParseFloat(graphUnquote(literal), 64); err == nil {
-							pred.IsNumber = true
-							pred.NumberValue = value
-							parsedTypedLiteral = true
-						}
-						if !parsedTypedLiteral {
-							switch strings.ToLower(strings.TrimSpace(literal)) {
-							case "true":
-								pred.IsBool = true
-								pred.BoolValue = true
-								parsedTypedLiteral = true
-							case "false":
-								pred.IsBool = true
-								pred.BoolValue = false
-								parsedTypedLiteral = true
-							}
-						}
-					}
-					if !parsedTypedLiteral {
-						pred.StringValue = graphUnquote(literal)
-					}
-				}
-			default:
-				return nil, fmt.Errorf("unsupported_predicate_field:%s", fieldExpr)
-			}
-		case "from", "to":
-			switch fieldExpr {
-			case "id":
-				pred.Field = "id"
-				if op != "=" && op != "!=" {
-					return nil, fmt.Errorf("string_predicates_only_support_equal_or_not_equal")
-				}
-				pred.StringValue = graphUnquote(literal)
-			case "label":
-				pred.Field = "label"
-				if op != "=" && op != "!=" {
-					return nil, fmt.Errorf("string_predicates_only_support_equal_or_not_equal")
-				}
-				pred.StringValue = graphUnquote(literal)
-			default:
-				return nil, fmt.Errorf("unsupported_predicate_field:%s", fieldExpr)
-			}
-		default:
-			return nil, fmt.Errorf("unsupported_scope")
-		}
-		preds = append(preds, pred)
-	}
-	return preds, nil
-}
-
 func parseGraphReturnMode(raw string) (graphQueryReturnMode, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	switch mode {
@@ -1541,16 +1153,13 @@ func parseGraphReturnMode(raw string) (graphQueryReturnMode, error) {
 		return graphReturnPaths, nil
 	case "count":
 		return graphReturnCount, nil
+	case "rows":
+		return graphReturnRows, nil
+	case "groups":
+		return graphReturnGroups, nil
 	default:
 		return "", fmt.Errorf("invalid_return_mode")
 	}
-}
-
-func graphHasPrefixFold(raw string, prefix string) bool {
-	if len(raw) < len(prefix) {
-		return false
-	}
-	return strings.EqualFold(raw[:len(prefix)], prefix)
 }
 
 func graphSkipSpaces(raw string, idx int) int {
@@ -1568,23 +1177,19 @@ func graphExtractGroup(raw string, start int, open byte, close byte) (string, in
 		return "", start, fmt.Errorf("expected_%c", open)
 	}
 	depth := 0
-	inSingle := false
-	inDouble := false
 	for i := start; i < len(raw); i++ {
-		ch := raw[i]
-		if ch == '\'' && !inDouble {
-			inSingle = !inSingle
-		}
-		if ch == '"' && !inSingle {
-			inDouble = !inDouble
-		}
-		if inSingle || inDouble {
+		if raw[i] == '\'' || raw[i] == '"' {
+			end, _, err := graphQueryReadString(raw, i)
+			if err != nil {
+				return "", start, err
+			}
+			i = end - 1
 			continue
 		}
-		if ch == open {
+		if raw[i] == open {
 			depth++
 		}
-		if ch == close {
+		if raw[i] == close {
 			depth--
 			if depth == 0 {
 				return raw[start+1 : i], i + 1, nil
@@ -1594,65 +1199,13 @@ func graphExtractGroup(raw string, start int, open byte, close byte) (string, in
 	return "", start, fmt.Errorf("unterminated_group")
 }
 
-func graphConsumeClause(raw string, keyword string, stopKeywords []string) (string, string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", "", nil
-	}
-	if !graphHasPrefixFold(trimmed, keyword) {
-		return "", trimmed, nil
-	}
-	rest := strings.TrimSpace(trimmed[len(keyword):])
-	if rest == "" {
-		return "", "", fmt.Errorf("%s_clause_requires_value", strings.ToLower(keyword))
-	}
-	stopIdx := -1
-	stopLen := 0
-	for _, stop := range stopKeywords {
-		idx := graphFindKeyword(rest, stop)
-		if idx >= 0 && (stopIdx < 0 || idx < stopIdx) {
-			stopIdx = idx
-			stopLen = len(stop)
-		}
-	}
-	if stopIdx < 0 {
-		return strings.TrimSpace(rest), "", nil
-	}
-	value := strings.TrimSpace(rest[:stopIdx])
-	next := strings.TrimSpace(rest[stopIdx:])
-	if value == "" {
-		return "", "", fmt.Errorf("%s_clause_requires_value", strings.ToLower(keyword))
-	}
-	if stopLen > 0 && !graphHasPrefixFold(next, rest[stopIdx:stopIdx+stopLen]) {
-		return "", "", fmt.Errorf("internal_clause_parse_error")
-	}
-	return value, next, nil
-}
-
-func graphConsumeAnyClause(raw string, keywords []string, stopKeywords []string) (string, string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", "", nil
-	}
-	for _, keyword := range keywords {
-		value, next, err := graphConsumeClause(trimmed, keyword, stopKeywords)
-		if err != nil {
-			return "", "", err
-		}
-		if strings.TrimSpace(next) != trimmed || value != "" {
-			return value, next, nil
-		}
-	}
-	return "", trimmed, nil
-}
-
 func parseGraphHopBounds(raw string) (int, int, error) {
 	value := strings.TrimSpace(raw)
 	if value == "" {
 		return 0, 0, fmt.Errorf("hops_clause_requires_value")
 	}
 	normalize := func(minHops int, maxHops int) (int, int, error) {
-		if minHops < 1 || maxHops < 1 {
+		if minHops < 1 || maxHops < 1 || minHops > graphMaxHops {
 			return 0, 0, fmt.Errorf("invalid_hops")
 		}
 		if minHops > maxHops {
@@ -1715,152 +1268,37 @@ func graphEdgeTraversalCost(weight float64) float64 {
 	return 1.0 / weight
 }
 
-func graphFindKeyword(raw string, keyword string) int {
-	if raw == "" || keyword == "" {
-		return -1
-	}
-	upperRaw := strings.ToUpper(raw)
-	upperKW := strings.ToUpper(keyword)
-	inSingle := false
-	inDouble := false
-	for i := 0; i+len(keyword) <= len(raw); i++ {
-		ch := raw[i]
-		if ch == '\'' && !inDouble {
-			inSingle = !inSingle
-		}
-		if ch == '"' && !inSingle {
-			inDouble = !inDouble
-		}
-		if inSingle || inDouble {
-			continue
-		}
-		if upperRaw[i:i+len(keyword)] != upperKW {
-			continue
-		}
-		beforeOK := i == 0 || raw[i-1] == ' ' || raw[i-1] == '\t' || raw[i-1] == '\n' || raw[i-1] == '\r'
-		afterIdx := i + len(keyword)
-		afterOK := afterIdx >= len(raw) || raw[afterIdx] == ' ' || raw[afterIdx] == '\t' || raw[afterIdx] == '\n' || raw[afterIdx] == '\r'
-		if beforeOK && afterOK {
-			return i
-		}
-	}
-	return -1
-}
-
-func graphSplitByAND(raw string) ([]string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil, nil
-	}
-	var parts []string
-	start := 0
-	inSingle := false
-	inDouble := false
-	upper := strings.ToUpper(trimmed)
-	for i := 0; i < len(trimmed); i++ {
-		ch := trimmed[i]
-		if ch == '\'' && !inDouble {
-			inSingle = !inSingle
-		}
-		if ch == '"' && !inSingle {
-			inDouble = !inDouble
-		}
-		if inSingle || inDouble {
-			continue
-		}
-		if i+3 <= len(trimmed) && upper[i:i+3] == "AND" {
-			beforeOK := i == 0 || trimmed[i-1] == ' ' || trimmed[i-1] == '\t'
-			afterOK := i+3 >= len(trimmed) || trimmed[i+3] == ' ' || trimmed[i+3] == '\t'
-			if beforeOK && afterOK {
-				part := strings.TrimSpace(trimmed[start:i])
-				if part == "" {
-					return nil, fmt.Errorf("invalid_where_and_expression")
-				}
-				parts = append(parts, part)
-				start = i + 3
-			}
-		}
-	}
-	last := strings.TrimSpace(trimmed[start:])
-	if last == "" {
-		return nil, fmt.Errorf("invalid_where_clause")
-	}
-	parts = append(parts, last)
-	return parts, nil
-}
-
 func graphSplitCSV(raw string) ([]string, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return nil, nil
-	}
 	var out []string
 	start := 0
-	inSingle := false
-	inDouble := false
-	for i := 0; i < len(trimmed); i++ {
-		ch := trimmed[i]
-		if ch == '\'' && !inDouble {
-			inSingle = !inSingle
-		}
-		if ch == '"' && !inSingle {
-			inDouble = !inDouble
-		}
-		if inSingle || inDouble {
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\'' || raw[i] == '"' {
+			end, _, err := graphQueryReadString(raw, i)
+			if err != nil {
+				return nil, err
+			}
+			i = end - 1
 			continue
 		}
-		if ch == ',' {
-			part := strings.TrimSpace(trimmed[start:i])
-			if part != "" {
-				out = append(out, part)
-			}
+		if raw[i] == ',' {
+			out = append(out, strings.TrimSpace(raw[start:i]))
 			start = i + 1
 		}
 	}
-	last := strings.TrimSpace(trimmed[start:])
-	if last != "" {
+	if last := strings.TrimSpace(raw[start:]); last != "" {
 		out = append(out, last)
 	}
 	return out, nil
 }
 
 func graphUnquote(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if len(trimmed) < 2 {
-		return trimmed
-	}
-	if (trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'') || (trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"') {
-		if unquoted, err := strconv.Unquote(trimmed); err == nil {
-			return unquoted
-		}
-		return trimmed[1 : len(trimmed)-1]
-	}
-	return trimmed
-}
-
-func graphIsQuotedLiteral(raw string) bool {
-	trimmed := strings.TrimSpace(raw)
-	if len(trimmed) < 2 {
-		return false
-	}
-	return (trimmed[0] == '\'' && trimmed[len(trimmed)-1] == '\'') || (trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"')
-}
-
-func graphNormalizePropertyPath(raw string) []string {
 	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	parts := strings.Split(raw, ".")
-	out := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+	if len(raw) >= 2 && (raw[0] == '\'' || raw[0] == '"') {
+		if end, value, err := graphQueryReadString(raw, 0); err == nil && end == len(raw) {
+			return value
 		}
-		out = append(out, part)
 	}
-	return out
+	return raw
 }
 
 func graphLookupPropertyValue(props map[string]interface{}, path []string) (interface{}, bool) {
@@ -1967,215 +1405,20 @@ func graphPropertyValueAsString(value interface{}) string {
 	}
 }
 
-func (db *Database) graphIndexedEdgeCandidates(predicates []graphQueryPredicate) (map[string]struct{}, bool, error) {
-	if len(predicates) == 0 {
-		return nil, false, nil
-	}
-	var indexedPredicates []graphQueryPredicate
-	for _, pred := range predicates {
-		if pred.Scope != "edge" || pred.Field != "prop" || pred.Op != "=" {
-			continue
-		}
-		if len(pred.PropPath) != 1 {
-			continue
-		}
-		if !(pred.IsNumber || pred.IsBool || pred.StringValue != "") {
-			continue
-		}
-		indexedPredicates = append(indexedPredicates, pred)
-	}
-	if len(indexedPredicates) == 0 {
-		return nil, false, nil
-	}
-	var candidateSet map[string]struct{}
-	for _, pred := range indexedPredicates {
-		token := ""
-		switch {
-		case pred.IsNumber:
-			token = "n:" + strconv.FormatFloat(pred.NumberValue, 'f', -1, 64)
-		case pred.IsBool:
-			if pred.BoolValue {
-				token = "b:1"
-			} else {
-				token = "b:0"
-			}
-		default:
-			token = "s:" + pred.StringValue
-		}
-		indexMatches, err := db.graphScanIndexedEdgeIDs(pred.PropPath[0], token)
-		if err != nil {
-			return nil, true, err
-		}
-		if candidateSet == nil {
-			candidateSet = indexMatches
-			continue
-		}
-		for edgeID := range candidateSet {
-			if _, ok := indexMatches[edgeID]; !ok {
-				delete(candidateSet, edgeID)
-			}
-		}
-		if len(candidateSet) == 0 {
-			return candidateSet, true, nil
-		}
-	}
-	return candidateSet, true, nil
-}
-
-func (db *Database) graphScanIndexedEdgeIDs(propKey string, valueToken string) (map[string]struct{}, error) {
-	prefix := graphEdgeIndexScanPrefix(propKey, valueToken)
-	out := make(map[string]struct{})
-	cursor := []byte(nil)
-	for pages := 0; pages < graphMaxScanPages*8; pages++ {
-		results, nextCursor, err := db.PairScanWithOptions(prefix, graphDefaultScanPage, cursor, true)
-		if err != nil {
-			return nil, err
-		}
-		if len(results) == 0 {
-			return out, nil
-		}
-		for _, result := range results {
-			value := string(result.Value)
-			if !strings.HasPrefix(value, graphEdgeIndexPrefix) {
-				continue
-			}
-			parts := strings.Split(value, "/")
-			if len(parts) < 4 {
-				continue
-			}
-			edgeIDEncoded := parts[len(parts)-1]
-			decoded, err := base64.RawURLEncoding.DecodeString(edgeIDEncoded)
-			if err != nil {
-				continue
-			}
-			out[string(decoded)] = struct{}{}
-		}
-		if len(nextCursor) == 0 || len(results) < graphDefaultScanPage {
-			return out, nil
-		}
-		cursor = nextCursor
-	}
-	return out, nil
-}
-
-func (db *Database) graphMatchNodePattern(nodeID string, pattern graphQueryNodePattern, cache map[string]*GraphNodeRecord) bool {
-	if pattern.Wildcard {
-		return true
-	}
-	if pattern.ID != "" && nodeID != pattern.ID {
-		return false
-	}
-	if pattern.Label == "" {
-		return true
-	}
-	node, ok := cache[nodeID]
-	if !ok {
-		record, found, err := db.graphGetNode(nodeID)
-		if err != nil || !found {
-			return false
-		}
-		cache[nodeID] = &record
-		node = &record
-	}
-	return graphContainsLabel(node.Labels, pattern.Label)
-}
-
-func (db *Database) graphEvaluatePredicate(edge *GraphEdgeRecord, pred graphQueryPredicate, cache map[string]*GraphNodeRecord) (bool, error) {
-	if edge == nil {
-		return false, nil
-	}
-	switch pred.Scope {
-	case "edge":
-		switch pred.Field {
-		case "type":
-			return graphCompareString(edge.Type, pred.Op, pred.StringValue), nil
-		case "weight":
-			return graphCompareFloat(edge.Weight, pred.Op, pred.NumberValue), nil
-		case "confidence":
-			return graphCompareFloat(graphEffectiveConfidence(edge), pred.Op, pred.NumberValue), nil
-		case "modality":
-			modality := graphEffectiveModality(edge)
-			if pred.Op == "=" || pred.Op == "!=" {
-				return graphCompareString(modality, pred.Op, pred.StringValue), nil
-			}
-			rank, ok := graphModalityRank(modality)
-			if !ok {
-				return false, nil
-			}
-			return graphCompareFloat(float64(rank), pred.Op, pred.NumberValue), nil
-		case "ambiguity":
-			return graphCompareString(edge.Ambiguity, pred.Op, pred.StringValue), nil
-		case "prop":
-			propValue, ok := graphLookupPropertyValue(edge.Props, pred.PropPath)
-			if !ok {
-				if pred.Op == "!=" {
-					return true, nil
-				}
-				return false, nil
-			}
-			if pred.IsNumber {
-				actual, ok := graphValueAsFloat(propValue)
-				if !ok {
-					return false, nil
-				}
-				return graphCompareFloat(actual, pred.Op, pred.NumberValue), nil
-			}
-			if pred.IsBool {
-				actual, ok := graphValueAsBool(propValue)
-				if !ok {
-					return false, nil
-				}
-				expected := pred.BoolValue
-				if pred.Op == "!=" {
-					return actual != expected, nil
-				}
-				return actual == expected, nil
-			}
-			actual := graphPropertyValueAsString(propValue)
-			return graphCompareString(actual, pred.Op, pred.StringValue), nil
-		default:
-			return false, fmt.Errorf("unsupported_edge_predicate")
-		}
-	case "from", "to":
-		nodeID := edge.From
-		if pred.Scope == "to" {
-			nodeID = edge.To
-		}
-		switch pred.Field {
-		case "id":
-			return graphCompareString(nodeID, pred.Op, pred.StringValue), nil
-		case "label":
-			node, ok := cache[nodeID]
-			if !ok {
-				record, found, err := db.graphGetNode(nodeID)
-				if err != nil {
-					return false, err
-				}
-				if !found {
-					return false, nil
-				}
-				cache[nodeID] = &record
-				node = &record
-			}
-			contains := graphContainsLabel(node.Labels, pred.StringValue)
-			if pred.Op == "!=" {
-				return !contains, nil
-			}
-			return contains, nil
-		default:
-			return false, fmt.Errorf("unsupported_node_predicate")
-		}
-	default:
-		return false, fmt.Errorf("unsupported_scope")
-	}
-}
-
 func graphCompareString(actual string, op string, expected string) bool {
 	switch op {
 	case "=":
 		return actual == expected
 	case "!=":
 		return actual != expected
+	case ">":
+		return actual > expected
+	case ">=":
+		return actual >= expected
+	case "<":
+		return actual < expected
+	case "<=":
+		return actual <= expected
 	default:
 		return false
 	}

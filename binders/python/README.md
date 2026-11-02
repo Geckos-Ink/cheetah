@@ -404,3 +404,9 @@ directory — note that it builds only when the binary is **missing**, so a stal
 `cheetah-server` at the repository root silently tests an old protocol. Rebuild
 it (`go build -o cheetah-server ./src`) when a command there answers
 `ERROR,unknown_command`.
+
+Graph clauses passed to `graph.query` support the server's boolean WHERE operators, endpoint
+JOINs, relationship INCLUDE/EXCLUDE, GROUP BY and INCLUDE FIELDS/EXCLUDE FIELDS. RETURN `rows`
+produces `{edge,join1,...}` objects; RETURN `groups` produces typed keys, counts and base-edge
+weight aggregates. The wrapper preserves quoted whitespace and requires one command line.
+See [the server grammar](../../README.md#pattern-queries--graph_query) for bounds and examples.

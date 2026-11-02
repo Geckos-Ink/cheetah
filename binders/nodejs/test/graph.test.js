@@ -323,3 +323,14 @@ test('query reports the return mode, the match count and the payload', async () 
     const result = await graph.query(conn, "MATCH (id='a')-[:*]->(*) RETURN nodes");
     assert.deepEqual(result, { mode: 'nodes', matches: 2, nextCursor: null, payload: ['a', 'b'] });
 });
+
+test('relational queries preserve literals and decode grouped and projected rows', async () => {
+    const clause = "MATCH (id='a')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE edge.props.name <> 'two  spaces' GROUP BY join1.to.id RETURN groups";
+    const groups = [{ key: { 'join1.to.id': 'org' }, count: 2, weight_sum: 1.5, weight_avg: 0.75 }];
+    const conn = fakeConn(() => `SUCCESS,return=groups,matches=1,next_cursor=*,payload=${payloadOf(groups)}`);
+    const result = await graph.query(conn, clause);
+    assert.equal(conn.lines[0], `GRAPH_QUERY ${clause}`);
+    assert.equal(result.mode, 'groups');
+    assert.deepEqual(result.payload, groups);
+    for (const separator of ['\n', '\r']) assert.throws(() => graph.buildQuery(`MATCH${separator}(id='a')`), /one line/);
+});

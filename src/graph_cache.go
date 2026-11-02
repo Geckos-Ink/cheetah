@@ -15,6 +15,8 @@
 //     insieme di semi. È il caso in cui tante informazioni vanno confrontate fra
 //     loro per trovare ciò che condividono: il confronto si fa una volta e la
 //     risposta resta.
+//     Le firme sql-exists-v1-… riusano lo stesso record per i sì/no dei filtri
+//     relazionali ricorrenti, con identici limiti, epoca e potatura.
 //   - `\x07gc:e` — l'epoca di scrittura del grafo, che invecchia le convergenze.
 //
 // Il mantra è che una cache si *allena*, non si riempie. Tre meccanismi, tutti
@@ -539,8 +541,9 @@ type graphCacheStore struct {
 	mu  sync.RWMutex
 	cfg graphCacheConfig
 
-	metrics graphCacheMetrics
-	classes [graphCacheClassSlots]graphCacheClass
+	metrics      graphCacheMetrics
+	classes      [graphCacheClassSlots]graphCacheClass
+	queryHistory [graphCacheClassSlots]graphQueryHistory // Impronte SQL recenti, protette da mu.
 
 	// rollFn è il dado dell'ammissione, nowFn l'orologio del decadimento.
 	// Sono campi perché i test devono poter forzare "ammetti sempre" e far
@@ -971,6 +974,10 @@ func (store *graphCacheStore) observeLink(from string, to string, score float64,
 // già stato pagato per intero e la sua firma è unica, quindi non c'è niente da
 // esplorare a caso: o serve la prossima volta, o il maintainer la butta.
 func (store *graphCacheStore) observeCommon(signature string, members []graphCacheMember, class int) bool {
+	return store.observeCommonAtEpoch(signature, members, class, store.currentEpoch())
+}
+
+func (store *graphCacheStore) observeCommonAtEpoch(signature string, members []graphCacheMember, class int, epoch uint64) bool {
 	if store == nil || signature == "" {
 		return false
 	}
@@ -979,7 +986,6 @@ func (store *graphCacheStore) observeCommon(signature string, members []graphCac
 	lock.Lock()
 	defer lock.Unlock()
 	now := store.unixNow()
-	epoch := store.currentEpoch()
 	if len(members) > graphCacheMaxMembers {
 		members = members[:graphCacheMaxMembers]
 	}

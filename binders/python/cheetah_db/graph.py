@@ -372,14 +372,16 @@ def neighbor_types(
 def query(conn: Any, clause: str) -> dict[str, Any]:
     """``GRAPH_QUERY`` — the clause dialect, passed through verbatim.
 
-    The only command with its own grammar (``MATCH … [WHERE …] [HOPS …]
-    [RETURN …]``); the left node must be ID-anchored so execution stays
+    Supports boolean WHERE expressions, endpoint JOINs, relationship INCLUDE /
+    EXCLUDE, GROUP BY and field selection; the left node must be ID-anchored so execution stays
     index-backed. Nothing here validates the clause: the server owns it, and a
     client-side parser would only drift from it.
     """
-    text = " ".join(str(clause).split())
+    text = str(clause).strip()
     if not text:
         raise CheetahError("cheetah GRAPH_QUERY requires a clause")
+    if "\n" in text or "\r" in text:
+        raise CheetahError("cheetah GRAPH_QUERY requires one line")
     response = conn.send(f"GRAPH_QUERY {text}")
     if not response.ok:
         raise CheetahError(f"cheetah GRAPH_QUERY failed: {response.reason}", response=response)

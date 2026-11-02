@@ -750,7 +750,7 @@ Full grammar in [Graph Command Language](#graph-command-language).
 | `GRAPH_EDGE_SET from= to= [type=] [weight=] [directed=] [confidence=] [modality=] [ambiguity=] [props=] [autocreate=0]` | Upsert a **relation**, identified by the tuple `(from, to, type, directed)`. `weight` is traversal strength (cost `1/weight`); `confidence`/`modality` are how sure the claim is; `ambiguity` names the group of mutually exclusive readings it belongs to. Missing endpoint nodes are stubbed out unless `autocreate=0`. |
 | `GRAPH_EDGE_SET_BATCH items=<base64 json[]> [continue_on_error=1] [type=] [directed=] [weight=] [props=]` | The same upsert for many edges in one round-trip, with the top-level tokens acting as per-item defaults. Reports `requested/applied/created/updated/failed`. Kept for its response contract; `BATCH GRAPH_EDGE_SET type=… items=[…]` is the general form and reports `applied`/`failed` only. |
 | `GRAPH_EDGE_DEL from= to= [type=] [directed=]` | **Forget** the relation. Different from writing `confidence=ruled_out`, which keeps it on record as excluded and still answerable. |
-| `GRAPH_AMBIGUITY_SET from= group= options=<id>[=<share>][,…] [type=] [normalize=0]` | Write a whole set of **mutually exclusive readings** at once and normalize their shares to sum to 1. The engine has no `OR`, so a disjunction is stored as a group rather than expressed as a query. |
+| `GRAPH_AMBIGUITY_SET from= group= options=<id>[=<share>][,…] [type=] [normalize=0]` | Write a whole set of **mutually exclusive readings** at once and normalize their shares to sum to 1. A group stores the alternatives and their probability shares; query-time `OR` selects alternatives without storing their exclusivity. |
 | `GRAPH_AMBIGUITY_RESOLVE from= group= winner= [drop=1]` | Collapse the set: the winner becomes `certain`, the others `ruled_out` (or are deleted with `drop=1`), and the group dissolves. |
 
 **In context** — *"Marco's cat Luna is a siamese and may be sterile; they both live in Berlin."* One
@@ -795,7 +795,7 @@ Four of these read the *same* adjacency index — `GRAPH_NEIGHBORS`, `GRAPH_DEGR
 | `GRAPH_DEGREE id= [direction=] [type=] [weighted=1]` | **How many** (and how heavy), as a number. No records are read — the cheapest "how much do I know about X?". |
 | `GRAPH_NEIGHBOR_TYPES id= [direction=] [limit=] [cursor=] [weighted=1]` | **Which relations, and how many of each** — a compact `[{type,count,weighted}]` histogram without hydrating a single edge. The fast probe before deciding what to hydrate. |
 | `GRAPH_AMBIGUITY_GET from= group= [direction=] [limit=]` | One alternative group read back, strongest reading first, with `confidence_sum` and `top`. |
-| `GRAPH_QUERY MATCH … [WHERE …] [HOPS …] [BRANCH_LIMIT …] [COST_LIMIT …] [RETURN …] [LIMIT …] [CURSOR …]` | The same walk with **predicates, several hops and explicit bounds**, and a choice of what comes back: `edges`, `nodes`, `paths` or just `count`. The left node must be ID-anchored so execution stays index-backed. |
+| `GRAPH_QUERY MATCH … [JOIN/INCLUDE/EXCLUDE …] [WHERE …] [GROUP BY …] [RETURN …] [LIMIT …]` | An ID-anchored walk with boolean predicates, endpoint joins, relationship filters, grouping and field projection. `HOPS`, `BRANCH_LIMIT`, `COST_LIMIT` and `BUDGET` bound execution. Returns `edges`, `nodes`, `paths`, `count`, `rows` or `groups`. |
 
 **In context** — *"What do you know about Luna?"*, asked cheaply first and hydrated only where it
 pays. Each of these reads the same `adj/out` index:
@@ -1549,34 +1549,89 @@ without hydrating edge payloads.
 ### Pattern queries — `GRAPH_QUERY`
 
 ```text
-GRAPH_QUERY MATCH (<left>)-[:<type|*>]->(<right>)     # follow out-edges of <left>
-GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # follow in-edges of <left>
-  [WHERE <predicate> [AND <predicate> ...]]
-  [HOPS <max> | <min>..<max>]      # default 1..1
-  [BRANCH_LIMIT <n>]               # fan-out cap per hop (default 128)
-  [COST_LIMIT <float>]             # early-stop on accumulated traversal cost (cost per hop = 1/weight)
-  [RETURN edges | nodes | paths | count]   # default edges
-  [LIMIT <n>]                      # default 128
+GRAPH_QUERY MATCH (<left>)-[:<type|*>]->(<right>)     # outgoing adjacency
+GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # incoming adjacency
+  [JOIN (<endpoint>)-[:<type|*>]->(<target>) ...]
+  [INCLUDE (<endpoint>)-[:<type|*>]->(<target>) ...]
+  [EXCLUDE (<endpoint>)-[:<type|*>]->(<target>) ...]
+  [WHERE <expression>]
+  [HOPS <max> | <min>..<max>]       # default 1..1, max 16
+  [BRANCH_LIMIT <n>]                # multihop fan-out cap (default 128)
+  [COST_LIMIT <float>]              # accumulated cost, each hop costs 1/weight
+  [BUDGET <n>]                      # default 16384, max 1048576 work units
+  [CACHE auto | off]                # default auto, relationship existence checks
+  [GROUP BY <field>[,<field>...]]
+  [RETURN edges | nodes | paths | count | rows | groups]
+  [INCLUDE FIELDS <path>[,<path>...]]
+  [EXCLUDE FIELDS <path>[,<path>...]]
+  [LIMIT <n>]                       # default 128, max 2048
   [CURSOR <token>]
 ```
 
-- **Node patterns** are `*` (wildcard) or `id='value'`, optionally narrowed with `label='value'`
-  (e.g. `(id='alice',label='person')`). The **left node must be ID-anchored** — wildcard-left queries
-  are rejected so execution stays index-backed.
-- **Both arrow directions are supported and both anchor on the left node.** `-[:t]->` walks the
-  `adj/out` index, `<-[:t]-` walks `adj/in`; in either case the left pattern constrains the anchor and
-  the right pattern constrains the far endpoint. Predicates stay edge-oriented regardless of arrow:
-  `from.id`/`to.id` always mean the edge's own `from`/`to` fields, so in a reverse query the anchor is
-  `to.id`.
-- **Predicates** read `from.id`, `to.id`, `from.label`, `to.label`, `edge.type`, `edge.weight`,
-  `edge.confidence`, `edge.modality`, `edge.ambiguity`, and `edge.props.<key>` with operators
-  `= != >= <= > <`. An `edge.props.<key> = <literal>` equality is served straight from the
-  `graph/idx/` secondary index. `edge.confidence` accepts a number **or** a scale word
-  (`>= possible` is `>= 0.5`), and `edge.modality` compares the word itself for `=`/`!=` and its rank
-  on the scale for the ordering operators.
-- **RETURN modes**: `edges` (full edge records), `nodes` (sorted unique node ids), `paths` (compact
-  `{from,type,to,weight}` views), `count` (just `matches=<n>`, no payload). Since higher weight means
-  lower cost, `COST_LIMIT` prunes paths that traverse low-weight edges first.
+- **Node patterns** are `*`, `id='value'`, `label='value'`, or both assignments separated by a comma.
+  The **left node must have an ID**. Both arrows anchor on the left: outgoing uses `adj/out`, incoming
+  uses `adj/in`. Predicates stay edge-oriented: `from` and `to` mean the record's endpoints, even on
+  an incoming walk. Type and target ID together narrow the trie prefix to that exact pair.
+- **WHERE** supports `= != <> < <= > >=`, `IN (...)`, `NOT IN (...)`, `IS NULL`, `IS NOT NULL`,
+  parentheses and `NOT` / `AND` / `OR` (in that precedence order). Fields are `from.id`, `to.id`,
+  `from.label`, `to.label`, `from.props.<path>`, `to.props.<path>`, `edge.id`, `edge.type`,
+  `edge.directed`, `edge.weight`, `edge.confidence`, `edge.modality`, `edge.ambiguity`, and
+  `edge.props.<path>`. Property names retain their case. Numbers compare numerically; quoted strings
+  support bytewise lexical ordering. Labels support equality, inequality and membership. Booleans
+  support equality and membership. Missing properties and JSON null satisfy `IS NULL`; for legacy
+  compatibility a missing property also satisfies `!=` / `<>`. Other comparisons with missing fields,
+  including `NOT IN`, are false. This is a boolean graph filter, not SQL three-valued null logic.
+  `edge.confidence` accepts a number or scale word (`>= possible` is `>= 0.5`); modality ordering uses
+  its scale rank. Strings accept doubled quotes (`'O''Reilly'`) or backslash escapes. Keep the command
+  on one line; spaces inside quoted strings are preserved.
+- **JOIN** is an inner join from a bound endpoint, with one output row per matching adjacent edge.
+  Its source is `(from)`, `(to)`, `(join1.from)`, `(join1.to)`, etc. Joins are numbered by their
+  occurrence, starting at 1; `join1.edge.weight` and `join1.to.props.city` address joined fields in
+  WHERE / GROUP BY. A later join can start at an earlier join's endpoint. Both arrows work.
+  JOIN patterns must follow their dependencies; other clauses can appear in any order.
+- **INCLUDE / EXCLUDE relationship patterns** are existence / nonexistence filters. They use the
+  same bound endpoints and arrows as JOIN, stop at the first match, and do not multiply rows.
+- **GROUP BY** streams all matching joined rows into at most 2,048 groups, with at most 1 MiB of
+  encoded group keys. Keys must be scalars; absent values form a null group, and numbers, strings
+  and booleans remain distinct. `RETURN groups` is implied and returns
+  `{key:{"field":value,...},count,weight_sum,weight_min,weight_max,weight_avg}`. Weight aggregates
+  refer to the base MATCH edge, once per joined row. Groups are sorted deterministically by their
+  encoded typed keys; LIMIT applies **after** aggregation. Exceeding a work/group bound returns an
+  error, never an incomplete aggregate.
+- **RETURN** defaults to `edges`. `nodes` returns sorted unique endpoints of base edges; `paths`
+  returns compact `{from,type,to,weight}` views; `count` returns only `matches=`. `rows` returns
+  `{edge:<base edge>,join1:<joined edge>,...}`. With JOIN, `edges` / `paths` repeat the base edge per
+  joined row, and `count` counts joined rows. LIMIT bounds matched rows for these modes.
+- **INCLUDE FIELDS / EXCLUDE FIELDS** project the JSON objects of `edges`, `paths` or `rows`.
+  Paths follow the returned JSON: `to,props.name` for edges, `edge.to,join1.props.name` for rows.
+  Exclusions apply after inclusions; absent paths are omitted. Projection never changes stored data.
+- **Bounds and paging:** JOIN, relationship filters, GROUP BY and field projection currently require
+  `HOPS 1`; plain queries retain bounded multihop traversal. A work unit charges an adjacency page
+  seek, an examined adjacency row, a node hydration, or a matched single-hop row. Work is bounded
+  across every nested join/filter. Multihop also caps its frontier at 4,096 states. Retained row JSON
+  is capped at 8 MiB, node memoization at 64 records, query text at 64 KiB, associations at 8,
+  fields at 32, IN lists at 128 and expression nesting at 32. Pages shrink under memory pressure.
+  Ordinary single-hop queries, including relationship filters and projections, preserve cursors.
+  JOIN / GROUP BY and multihop do not support cursors; a limited JOIN returns a bounded prefix
+  with `next_cursor=*`, so raise LIMIT/BUDGET when a larger result is required.
+- **SSD access and caching:** the executor streams adjacency trie prefixes and decodes one edge at
+  a time. It does not materialize graph-wide property candidate sets. The existing `graph/idx/`
+  property index remains maintained for compatibility; WHERE filters are evaluated on the anchored
+  adjacency stream. Repeated expensive INCLUDE/EXCLUDE checks can memoize a yes/no result in the
+  existing hidden `\x07gc:q/` cache. A fixed 64-slot recent-history table gates admission: a first
+  observation writes nothing, cheap checks stay uncached, and recurring expensive checks are
+  sampled according to the existing class bias. Entries share graph-cache local/global ceilings,
+  epoch invalidation, hit counters, aging and background pruning; negative results invalidate on
+  graph writes too. `CACHE off`, `graph_cache_enabled=0`, `GRAPH_CACHE stats/prune` and
+  `DEL graph_cache scope=queries` apply to these memos. No new storage format or eager cache table.
+
+```text
+GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE join1.to.id != 'closed' AND (edge.weight > 0.5 OR to.props.role IN ('lead','owner')) RETURN rows INCLUDE FIELDS edge.to,join1.to LIMIT 32
+
+GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) INCLUDE (to)-[:works_at]->(id='acme') EXCLUDE (to)-[:blocked]->(id='alice') RETURN edges INCLUDE FIELDS to,props EXCLUDE FIELDS props.private
+
+GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) GROUP BY join1.to.id RETURN groups BUDGET 65536 LIMIT 16
+```
 
 ```text
 [cheetah_data/graphlang]> GRAPH_QUERY MATCH (id='alice')-[:follows]->(*) WHERE edge.weight >= 0.5 RETURN edges LIMIT 8
@@ -1748,7 +1803,7 @@ shown decoded on the following comment line.
 | Attribute you *will* query or join — "siamese", "cute", "gluten-free" | its own node + a typed edge | reachable from both ends: "which of my pets are sweet?" starts at `trait:sweet` |
 | Relation — "owns", "works at", "reports to" | edge `type=` (snake_case verb) | edge types are the traversal alphabet; keep them few and stable |
 | Hedge — "may be", "I think", "probably" | `confidence=possible` (a number or a word) | keeps the edge *type* stable, so one query shape finds certain and uncertain facts |
-| Disjunction — "either A or B, I forget" | `GRAPH_AMBIGUITY_SET … group=<g> options=A,B` | see [uncertainty and ambiguity](#uncertainty-and-ambiguity); the engine has no `OR`, so alternatives are a group |
+| Disjunction — "either A or B, I forget" | `GRAPH_AMBIGUITY_SET … group=<g> options=A,B` | see [uncertainty and ambiguity](#uncertainty-and-ambiguity); a group stores the alternatives and their probability shares |
 | Time / provenance — "since 2019", "she told me" | edge `props` (`since`, `source`) | indexed for `WHERE edge.props.<k> = <v>` equality |
 | Wish / question — "I would like…" | `intent:` node + `wants` / `about` edges | the question itself becomes a fact you can answer, revisit, and close |
 
@@ -2109,10 +2164,10 @@ The rest of the vocabulary still lives in `props`, because it is provenance rath
 
 Where the query language stops, and what to do about it:
 
-- **`WHERE` is AND-only** — no `OR`, no `NOT`, no parentheses (see
-  [`parseGraphWhereClause`](src/graph.go), which splits on `AND`). This is why a disjunction is stored as
-  a *group* rather than expressed as a query: one `edge.ambiguity` equality returns the whole set.
-  `!=` covers per-field negation, and anything richer belongs in the client.
+- **Boolean filtering and stored ambiguity have separate roles.** WHERE supports `OR`, `NOT` and
+  parentheses (see [`graph_query_expr.go`](src/graph_query_expr.go)). An `edge.ambiguity` equality
+  retrieves a stored set of alternatives and their probability shares; a boolean expression selects
+  edges for the current query without storing or normalizing an ambiguity group.
 - **Exclusivity is enforced at write time, not as an invariant.** `GRAPH_AMBIGUITY_SET` and
   `GRAPH_AMBIGUITY_RESOLVE` keep a group normalized, but a later plain `GRAPH_EDGE_SET` on one member
   can unbalance it — rewrite the group through `GRAPH_AMBIGUITY_SET` rather than editing members.
@@ -2133,7 +2188,7 @@ Where the query language stops, and what to do about it:
 | "What is X's R?" (one hop, known relation) | `GRAPH_NEIGHBORS id=X type=R` | plain adjacency page, cursor-resumable |
 | "Who R's X?" (reverse) | `GRAPH_NEIGHBORS id=X direction=in type=R`, or `MATCH (id='X')<-[:R]-(*)` | in-adjacency is its own index; keep X on the left and flip the arrow |
 | "Is that certain?" | `… WHERE edge.weight >= 0.8` | `matches=0` means "nothing I'd assert", not "false" |
-| "…but only the ones where <condition>" | `GRAPH_QUERY … WHERE …` | `edge.props.<k> = <literal>` is index-served; `edge.weight >= n` filters by confidence |
+| "…but only the ones where <condition>" | `GRAPH_QUERY … WHERE …` | `edge.props.<k>` predicates filter an anchored adjacency stream; `edge.weight >= n` filters by weight |
 | "Who is behind/above/downstream of X?" | `GRAPH_QUERY … HOPS 1..n RETURN paths` | bound with `BRANCH_LIMIT` + `COST_LIMIT`; `paths` is the compact form |
 | "Is X connected to Y at all?" | `GRAPH_QUERY MATCH (id='X')-[:*]->(id='Y') HOPS 1..n RETURN count` | `count` skips payload hydration entirely |
 | "How much do you know about X?" | `GRAPH_DEGREE id=X direction=both weighted=1` | one number, no edge reads |
@@ -2220,7 +2275,7 @@ READING a question or a wish:
   2. Resolve the anchor node id from the sentence (possessives resolve through the speaker's edges).
   3. Cheapest sufficient probe first: GRAPH_NODE_GET / GRAPH_NEIGHBOR_TYPES / GRAPH_DEGREE.
   4. Then the targeted read: GRAPH_NEIGHBORS (one hop, direction=in for reverse) or
-     GRAPH_QUERY (predicates, HOPS 1..n, RETURN edges|nodes|paths|count).
+     GRAPH_QUERY (boolean predicates, HOPS 1..n; single-hop JOIN, INCLUDE/EXCLUDE, GROUP BY, field projection).
   5. Answer only from returned rows; report weight/modality as uncertainty in the wording.
   6. Write the conclusion back: intent -[:blocked_by]-> …, intent -[:requires]-> action:….
 ```

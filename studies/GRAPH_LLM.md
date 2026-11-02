@@ -877,9 +877,12 @@ model quality.
 
 Design honestly around these; none of them has a workaround inside the server today.
 
-- **No `OR`/`NOT`/parentheses in `WHERE`** — predicates are AND-only. A disjunction is therefore
-  stored as an ambiguity *group* and read back with one `edge.ambiguity` equality; anything richer is
-  a client-side union.
+- **Relational queries are bounded and endpoint-anchored.** WHERE supports `OR`, `NOT`, parentheses,
+  comparisons, membership and null tests. JOIN, relationship INCLUDE/EXCLUDE, GROUP BY and field
+  projection require HOPS 1; JOIN/GROUP BY have no cursor support. They are not arbitrary SQL joins.
+  See [the current grammar](../README.md#pattern-queries--graph_query) for work and memory bounds.
+  Stored ambiguity groups retain alternatives and probability shares; boolean filtering only chooses
+  which edges the current query returns.
 - **Ambiguity groups are anchored to one node** and are normalized only when written through
   `GRAPH_AMBIGUITY_SET`/`_RESOLVE`; a plain `GRAPH_EDGE_SET` on a member can unbalance the group.
 - **No atomicity.** Each command commits on its own; a batch that half-fails leaves half-written state,
