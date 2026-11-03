@@ -57,7 +57,7 @@ func parseGraphQuery(raw string) (*graphQueryPlan, error) {
 	}
 	seen := make(map[string]bool)
 	joins := 0
-	var where, group string
+	var where, group, returns string
 	for _, clause := range clauses {
 		key, value := clause[0], clause[1]
 		if key == "JOIN" || key == "INCLUDE" || key == "EXCLUDE" {
@@ -123,7 +123,7 @@ func parseGraphQuery(raw string) (*graphQueryPlan, error) {
 			}
 			plan.CacheOff = strings.EqualFold(value, "off")
 		case "RETURN":
-			plan.Return, err = parseGraphReturnMode(value)
+			returns = value
 		case "LIMIT":
 			var n int
 			n, err = strconv.Atoi(value)
@@ -139,6 +139,11 @@ func parseGraphQuery(raw string) (*graphQueryPlan, error) {
 		}
 		if err != nil {
 			return nil, fmt.Errorf("invalid_%s:%w", strings.ToLower(strings.ReplaceAll(key, " ", "_")), err)
+		}
+	}
+	if returns != "" {
+		if err := graphQueryParseReturn(plan, returns, joins); err != nil {
+			return nil, err
 		}
 	}
 	if where != "" {
@@ -165,10 +170,10 @@ func parseGraphQuery(raw string) (*graphQueryPlan, error) {
 	if (len(plan.GroupBy) > 0) != (plan.Return == graphReturnGroups) {
 		return nil, fmt.Errorf("group_by_requires_return_groups")
 	}
-	if (joins > 0 || len(plan.GroupBy) > 0) && len(plan.Cursor) > 0 {
-		return nil, fmt.Errorf("cursor_not_supported_for_join_or_group")
+	if (len(plan.GroupBy) > 0 || plan.Return == graphReturnAggregate) && len(plan.Cursor) > 0 {
+		return nil, fmt.Errorf("cursor_not_supported_for_aggregation")
 	}
-	if plan.MaxHops > 1 && (len(plan.Relations) > 0 || len(plan.GroupBy) > 0 || plan.Return == graphReturnRows || len(plan.IncludeFields)+len(plan.ExcludeFields) > 0) {
+	if plan.MaxHops > 1 && (len(plan.Relations) > 0 || len(plan.GroupBy) > 0 || plan.Return == graphReturnRows || len(plan.Select) > 0 || len(plan.IncludeFields)+len(plan.ExcludeFields) > 0) {
 		return nil, fmt.Errorf("relational_clauses_require_single_hop")
 	}
 	if len(plan.IncludeFields)+len(plan.ExcludeFields) > 0 && plan.Return != graphReturnEdges && plan.Return != graphReturnPaths && plan.Return != graphReturnRows {

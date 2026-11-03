@@ -186,6 +186,26 @@ test('cheetah binder round-trip', { skip: ENABLED ? false : 'set CHEETAH_INTEGRA
         assert.equal(ranked[0].sourceCount, 2);
     });
 
+    await t.test('joined answer projection, continuation and exact count work in both transports', async () => {
+        await graph.setEdge(pool, { from: 'ql:a', to: 'ql:b', type: 't' });
+        for (const to of ['ql:c', 'ql:d']) await graph.setEdge(pool, { from: 'ql:b', to, type: 'u' });
+        for (const binary of [false, true]) {
+            const conn = new CheetahClient({ port, database, binary });
+            try {
+                const base = "MATCH (id='ql:a')-[:t]->(*) JOIN (to)-[:u]->(*) WHERE from.id != @join1.to.id ";
+                const clause = base + 'RETURN DISTINCT join1.to.id AS value LIMIT 1';
+                const first = await graph.query(conn, clause);
+                assert.equal(first.complete, false);
+                const second = await graph.query(conn, `${clause} CURSOR ${first.nextCursor}`);
+                assert.equal(second.complete, true);
+                assert.deepEqual([...first.payload, ...second.payload].map((row) => row.value).sort(), ['ql:c', 'ql:d']);
+                const exact = await graph.query(conn, base + 'RETURN COUNT(DISTINCT join1.to.id) AS value LIMIT 1');
+                assert.equal(exact.complete, true);
+                assert.deepEqual(exact.payload, [{ value: 2 }]);
+            } finally { await conn.close(); }
+        }
+    });
+
     await t.test('a record table round-trips and survives a schema change', async () => {
         await records.define(pool, 'ngram', 'cnt:uint:4,prob:float:8,label:string:12', {
             ifNotExists: true,

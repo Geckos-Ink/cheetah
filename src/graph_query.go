@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -123,7 +122,7 @@ func (exec *graphQueryExecution) ready(expr *graphQueryExpr, row []*GraphEdgeRec
 		return true, true, nil
 	}
 	if expr.Op == "" {
-		if expr.Predicate.Join >= len(row) {
+		if expr.Predicate.Join >= len(row) || expr.Predicate.Reference != nil && expr.Predicate.Reference.Join >= len(row) {
 			return false, false, nil
 		}
 		ok, err := exec.matches(expr, row)
@@ -196,6 +195,12 @@ type graphQueryGroup struct {
 }
 
 func (db *Database) executeGraphRelationalQuery(plan *graphQueryPlan) (string, error) {
+	if len(plan.Select) > 0 || plan.hasJoins() && len(plan.GroupBy) == 0 {
+		return db.executeGraphBindingQuery(plan)
+	}
+	if bytes.HasPrefix(plan.Cursor, []byte("CHQ1")) {
+		return "", fmt.Errorf("graph_query_cursor_query_mismatch")
+	}
 	exec := newGraphQueryExecution(db, plan)
 	ok, err := exec.matchNode(plan.Left.ID, plan.Left)
 	if err != nil {
@@ -257,7 +262,6 @@ func (db *Database) executeGraphRelationalQuery(plan *graphQueryPlan) (string, e
 			return true, nil
 		}
 		matches++
-		var value interface{}
 		switch plan.Return {
 		case graphReturnCount:
 			return matches < plan.Limit, nil
@@ -272,36 +276,10 @@ func (db *Database) executeGraphRelationalQuery(plan *graphQueryPlan) (string, e
 				return false, fmt.Errorf("graph_query_output_capacity_exceeded")
 			}
 			return matches < plan.Limit, nil
-		case graphReturnRows:
-			fields := make(map[string]interface{}, len(row))
-			for i, edge := range row {
-				name := "edge"
-				if i > 0 {
-					name = "join" + strconv.Itoa(i)
-				}
-				fields[name] = edge
-				if len(plan.IncludeFields)+len(plan.ExcludeFields) > 0 {
-					fields[name] = graphQueryEdgeFields(edge)
-				}
-			}
-			value = fields
-		case graphReturnPaths:
-			edge := row[0]
-			value = graphPathView{From: edge.From, To: edge.To, Type: edge.Type, Weight: edge.Weight}
-			if len(plan.IncludeFields)+len(plan.ExcludeFields) > 0 {
-				value = map[string]interface{}{"from": edge.From, "to": edge.To, "weight": edge.Weight}
-				if edge.Type != "" {
-					value.(map[string]interface{})["type"] = edge.Type
-				}
-			}
-		default:
-			value = row[0]
-			if len(plan.IncludeFields)+len(plan.ExcludeFields) > 0 {
-				value = graphQueryEdgeFields(row[0])
-			}
 		}
-		if len(plan.IncludeFields)+len(plan.ExcludeFields) > 0 {
-			value = graphQueryProject(value.(map[string]interface{}), plan.IncludeFields, plan.ExcludeFields)
+		value, err := exec.bindingValue(row)
+		if err != nil {
+			return false, err
 		}
 		raw, err := json.Marshal(value)
 		if err != nil {

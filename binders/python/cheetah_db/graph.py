@@ -372,9 +372,9 @@ def neighbor_types(
 def query(conn: Any, clause: str) -> dict[str, Any]:
     """``GRAPH_QUERY`` — the clause dialect, passed through verbatim.
 
-    Supports boolean WHERE expressions, endpoint JOINs, relationship INCLUDE /
-    EXCLUDE, GROUP BY and field selection; the left node must be ID-anchored so execution stays
-    index-backed. Nothing here validates the clause: the server owns it, and a
+    Supports bound comparisons, resumable JOINs, aliased/distinct selection,
+    exact aggregates, INCLUDE / EXCLUDE and GROUP BY. The left node must be
+    ID-anchored so execution stays index-backed. The server validates the clause; a
     client-side parser would only drift from it.
     """
     text = str(clause).strip()
@@ -385,12 +385,15 @@ def query(conn: Any, clause: str) -> dict[str, Any]:
     response = conn.send(f"GRAPH_QUERY {text}")
     if not response.ok:
         raise CheetahError(f"cheetah GRAPH_QUERY failed: {response.reason}", response=response)
-    return {
+    result = {
         "return": response.field_value("return", ""),
         "matches": int(numeric_field(response.fields, "matches", 0) or 0),
         "payload": response.payload(),
         "cursor": response.cursor(),
     }
+    if "complete" in response.fields:
+        result["complete"] = response.field_value("complete") == "true"
+    return result
 
 
 def recall(

@@ -1562,6 +1562,9 @@ GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # incoming adjacency
   [CACHE auto | off]                # default auto, relationship existence checks
   [GROUP BY <field>[,<field>...]]
   [RETURN edges | nodes | paths | count | rows | groups]
+  [RETURN [DISTINCT] <field> [AS <alias>][,...]]
+  [RETURN COUNT(* | [DISTINCT] <field>) [AS <alias>][,...]]
+  [RETURN MIN(<field>) | MAX(<field>) [AS <alias>][,...]]
   [INCLUDE FIELDS <path>[,<path>...]]
   [EXCLUDE FIELDS <path>[,<path>...]]
   [LIMIT <n>]                       # default 128, max 2048
@@ -1584,6 +1587,12 @@ GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # incoming adjacency
   `edge.confidence` accepts a number or scale word (`>= possible` is `>= 0.5`); modality ordering uses
   its scale rank. Strings accept doubled quotes (`'O''Reilly'`) or backslash escapes. Keep the command
   on one line; spaces inside quoted strings are preserved.
+- **Bound comparisons** use an explicit `@` on the right: `from.id != @join1.to.id` or
+  `edge.props.score >= @join1.edge.props.score`. Both operands must be bound scalar fields;
+  unknown joins are parse errors. Numbers, strings and booleans retain their JSON types, with no
+  string/number coercion; different types compare unequal and have no ordering. Booleans allow
+  only equality/inequality. Missing/null operands make the comparison false, including `!=`.
+  Existing bare RHS text remains a literal: `from.id != join1.to.id` does **not** compare fields.
 - **JOIN** is an inner join from a bound endpoint, with one output row per matching adjacent edge.
   Its source is `(from)`, `(to)`, `(join1.from)`, `(join1.to)`, etc. Joins are numbered by their
   occurrence, starting at 1; `join1.edge.weight` and `join1.to.props.city` address joined fields in
@@ -1602,6 +1611,28 @@ GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # incoming adjacency
   returns compact `{from,type,to,weight}` views; `count` returns only `matches=`. `rows` returns
   `{edge:<base edge>,join1:<joined edge>,...}`. With JOIN, `edges` / `paths` repeat the base edge per
   joined row, and `count` counts joined rows. LIMIT bounds matched rows for these modes.
+- **Answer projection** uses the same bound fields as WHERE: `RETURN join1.from.id AS value`,
+  or `RETURN to.id AS id,to.props.name AS name`. It returns `return=values` and a JSON array of
+  objects keyed by the alias (the field name when omitted). Missing properties become JSON null.
+  This hydrates selected endpoint properties and selects answer variables from any join.
+- **Global DISTINCT** uses `RETURN DISTINCT <field> AS <alias>[,...]`. It deduplicates entire
+  projected objects across the complete logical input, then sorts their encoded JSON keys and pages
+  the results. State is bounded to 65,536 distinct objects and 8 MiB of encoded keys; overflow or
+  insufficient BUDGET returns an error. Each distinct page recomputes this bounded set; it does not
+  retain server-side state between requests. DISTINCT precedes LIMIT, so duplicates on later input
+  pages cannot reappear as new answers.
+- **Exact aggregates** use `RETURN COUNT(*) AS value`, `COUNT(field)`, `COUNT(DISTINCT field)`,
+  `MIN(field)` and `MAX(field)`, with optional aliases and several aggregates separated by commas.
+  They return `return=aggregate,matches=1` and one JSON object in the payload array. They consume
+  **all** filtered joined rows before producing a result; LIMIT never truncates aggregate input.
+  COUNT(field) skips missing/null values; COUNT(DISTINCT field) keeps JSON types distinct and shares
+  the distinct entry/byte ceilings across all aggregates. MIN/MAX accept uniformly numeric or
+  uniformly string values, skip missing/null fields, and reject mixed/composite/boolean values.
+  Empty input produces COUNT 0 and MIN/MAX null. String ordering is bytewise; numbers are JSON
+  float64 values. These operators do not implement RDF datatypes, numeric promotion or temporal
+  comparison. Keep RDF term identity and typed extrema/join-back in the converter until its import
+  contract defines them. These aggregate expressions cannot be mixed with ordinary fields or
+  GROUP BY; the existing `RETURN groups` contract stays unchanged.
 - **INCLUDE FIELDS / EXCLUDE FIELDS** project the JSON objects of `edges`, `paths` or `rows`.
   Paths follow the returned JSON: `to,props.name` for edges, `edge.to,join1.props.name` for rows.
   Exclusions apply after inclusions; absent paths are omitted. Projection never changes stored data.
@@ -1610,10 +1641,18 @@ GRAPH_QUERY MATCH (<left>)<-[:<type|*>]-(<right>)     # incoming adjacency
   seek, an examined adjacency row, a node hydration, or a matched single-hop row. Work is bounded
   across every nested join/filter. Multihop also caps its frontier at 4,096 states. Retained row JSON
   is capped at 8 MiB, node memoization at 64 records, query text at 64 KiB, associations at 8,
-  fields at 32, IN lists at 128 and expression nesting at 32. Pages shrink under memory pressure.
+  selected/group/projected fields at 32, IN lists at 128 and expression nesting at 32.
+  Pages shrink under memory pressure.
   Ordinary single-hop queries, including relationship filters and projections, preserve cursors.
-  JOIN / GROUP BY and multihop do not support cursors; a limited JOIN returns a bounded prefix
-  with `next_cursor=*`, so raise LIMIT/BUDGET when a larger result is required.
+  JOIN and answer projection return `complete=true|false` plus `next_cursor`. Pass a nonterminal
+  token back with CURSOR until `complete=true` / `next_cursor=*`; joined cursors preserve every
+  nested adjacency position. One extra matching row distinguishes a full last page from a limit
+  stop. Tokens are opaque, authenticated, capped at 24 KiB decoded and valid only for the same
+  query and open database handle. LIMIT, BUDGET and CACHE may change between pages. Graph writes,
+  reopen/reset or a changed query invalidate them; a detected write during execution returns an
+  error. This is an invalidation guard, not a concurrent snapshot: use a quiescent graph for exact
+  multi-request evaluation. GROUP BY / aggregate expressions and multihop do not accept cursors;
+  aggregation fails explicitly when its full input cannot fit the work/state bounds.
 - **SSD access and caching:** the executor streams adjacency trie prefixes and decodes one edge at
   a time. It does not materialize graph-wide property candidate sets. The existing `graph/idx/`
   property index remains maintained for compatibility; WHERE filters are evaluated on the anchored
@@ -1631,6 +1670,10 @@ GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE jo
 GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) INCLUDE (to)-[:works_at]->(id='acme') EXCLUDE (to)-[:blocked]->(id='alice') RETURN edges INCLUDE FIELDS to,props EXCLUDE FIELDS props.private
 
 GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) GROUP BY join1.to.id RETURN groups BUDGET 65536 LIMIT 16
+
+GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE from.id != @join1.to.id RETURN DISTINCT join1.to.id AS value LIMIT 32
+
+GRAPH_QUERY MATCH (id='alice')-[:knows]->(*) JOIN (to)-[:works_at]->(*) RETURN COUNT(DISTINCT join1.to.id) AS value BUDGET 65536
 ```
 
 ```text

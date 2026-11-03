@@ -279,6 +279,19 @@ func (p *graphQueryExprParser) parsePredicate() (*graphQueryExpr, error) {
 			default:
 				return nil, fmt.Errorf("unsupported_operator:%s", pred.Op)
 			}
+			if p.pos < len(p.tokens) && p.tokens[p.pos].Kind == 'w' && strings.HasPrefix(p.tokens[p.pos].Text, "@") {
+				ref, err := graphQueryParseField(strings.TrimPrefix(p.tokens[p.pos].Text, "@"), p.joins)
+				if err != nil {
+					return nil, err
+				}
+				if ref.Field == "label" || field.Field == "label" {
+					return nil, fmt.Errorf("field_comparison_requires_scalars")
+				}
+				p.pos++
+				pred.Reference = &ref
+				p.preds = append(p.preds, pred)
+				return &graphQueryExpr{Predicate: pred}, nil
+			}
 			value, err := p.literal(field)
 			if err != nil {
 				return nil, err
@@ -300,6 +313,9 @@ func (p *graphQueryExprParser) literal(field graphQueryField) (graphQueryLiteral
 	}
 	token := p.tokens[p.pos]
 	p.pos++
+	if token.Kind != 's' && strings.HasPrefix(token.Text, "@") {
+		return literal, fmt.Errorf("field_reference_requires_comparison")
+	}
 	literal = graphQueryLiteral{Value: token.Text, Kind: 's'}
 	if token.Kind != 's' {
 		if strings.EqualFold(token.Text, "null") {
@@ -440,6 +456,13 @@ func (exec *graphQueryExecution) matches(expr *graphQueryExpr, row []*GraphEdgeR
 	}
 	if pred.Op == "is not null" {
 		return exists, nil
+	}
+	if pred.Reference != nil {
+		expected, bound, err := exec.field(*pred.Reference, row)
+		if err != nil || !exists || !bound {
+			return false, err
+		}
+		return graphQueryCompareFields(actual, pred.Op, expected)
 	}
 	if !exists {
 		// Compatibilità: il WHERE storico considerava mancante != valore vero.

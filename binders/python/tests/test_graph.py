@@ -77,6 +77,23 @@ class EncodingTests(unittest.TestCase):
                 graph.query(Connection(), f"MATCH{separator}(id='a')")
 
 
+    def test_query_exposes_completion_and_bound_selection(self) -> None:
+        clause = "MATCH (id='a')-[:t]->(*) JOIN (to)-[:u]->(*) WHERE from.id != @join1.to.id RETURN DISTINCT join1.to.id AS value LIMIT 1"
+        lines = []
+
+        class Connection:
+            def send(self, line):
+                lines.append(line)
+                payload = base64.b64encode(b'[{"value":"c"}]').decode()
+                return parse_response(f"SUCCESS,return=values,matches=1,next_cursor=base64:opaque,complete=false,payload={payload}")
+
+        result = graph.query(Connection(), clause)
+        self.assertEqual(lines, [f"GRAPH_QUERY {clause}"])
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["cursor"], "base64:opaque")
+        self.assertEqual(result["payload"], [{"value": "c"}])
+
+
 class RecallTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = FakeConnection()

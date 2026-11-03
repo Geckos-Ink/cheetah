@@ -408,4 +408,10 @@ Graph clauses passed to `graph.query` support the server's boolean WHERE operato
 JOINs, relationship INCLUDE/EXCLUDE, GROUP BY and INCLUDE FIELDS/EXCLUDE FIELDS. RETURN `rows`
 produces `{edge,join1,...}` objects; RETURN `groups` produces typed keys, counts and base-edge
 weight aggregates. The wrapper preserves quoted whitespace and requires one command line.
+It also passes `@field` comparisons, `RETURN [DISTINCT] field AS alias`, and exact
+`COUNT(*)` / `COUNT(DISTINCT field)` / `MIN(field)` / `MAX(field)` expressions through unchanged.
+Joined and selected results expose `complete` when the server supplies it; pass the opaque
+`nextCursor` back in a CURSOR clause until exhausted. DISTINCT is global within the bounded query,
+and aggregate expressions consume the full input before returning; they raise on exhausted bounds.
+Generic JSON numeric/string aggregates do not implement RDF datatype semantics.
 See [the server grammar](../../README.md#pattern-queries--graph_query) for bounds and examples.

@@ -175,35 +175,41 @@ These findings come from [the parser](../src/graph_query_parse.go),
 | Mixed relation/direction paths | Endpoint JOIN, with incoming and outgoing arrows | Bind `join1`, `join2`, etc.; do not use HOPS for heterogeneous path predicates |
 | Relationship conjunction | INCLUDE is an existence filter | Useful for type checks and fixed-constant intersections; it does not multiply rows |
 | Scalar comparison and booleans | WHERE supports comparisons, IN, NOT/AND/OR | Safe pushdown for field-to-constant filters with matching types |
-| Field-to-field comparison | RHS is parsed as a literal, not a field reference | Keep variable comparisons in the adapter; bare `from.id != join1.to.id` can parse with the wrong meaning |
-| Named SPARQL variables | No arbitrary aliases; fields identify bound edge endpoints | Maintain a compiler binding map; endpoints stay edge-oriented even on incoming walks |
-| Projection | INCLUDE FIELDS selects existing JSON paths | It does not create `value`, rename bindings, hydrate node props, or implement DISTINCT |
+| Field-to-field comparison | Explicit `@field` RHS resolves another bound scalar | Use `from.id != @join1.to.id`; bare `join1.to.id` remains a legacy literal |
+| Named SPARQL variables | `RETURN field AS alias` selects bound fields | Maintain a compiler binding map; endpoints stay edge-oriented even on incoming walks |
+| Projection | `RETURN [DISTINCT] field AS value` hydrates/project fields; INCLUDE FIELDS still selects JSON paths | Native aliases/global DISTINCT can replace client projection when every RDF filter is already applied |
 | RETURN nodes | Unique endpoints of base MATCH edges | Includes the anchor and does not select the answer variable from joined edges |
-| RETURN count | Counts matched rows until LIMIT | Not an exhaustive COUNT DISTINCT or arbitrary aggregate |
-| GROUP BY | Bounded groups, counts and base-edge weight aggregates | Not MIN/MAX of an arbitrary RDF value or a tie-preserving ARGMIN/ARGMAX |
+| RETURN count | Legacy mode counts matched rows until LIMIT; `RETURN COUNT(*)` / `COUNT(DISTINCT field)` consume full input | Use aggregate expressions for exact count; handle explicit budget/capacity errors |
+| GROUP BY / aggregates | Legacy groups retain weight aggregates; `MIN(field)` / `MAX(field)` accept uniform JSON numbers or strings | RDF typed extrema and term-identity join-back still belong in the converter |
 | Paging | Single-hop scans/filters/projected edges have consumed-row cursors | Drain every page; the first page is not the answer set |
-| Joined results | JOIN has no cursor; LIMIT may stop a successful result | A joined `next_cursor=*` does not certify exhaustion |
+| Joined results | Authenticated full-path cursors and explicit `complete=true|false` | Resume until complete; graph mutation, changed query or reopen invalidates the token |
 | Temporal/numeric RDF types | No native RDF evaluator | Import metadata and evaluate accurately in a converter, then consider native extensions |
 
 Bounds are operational limits, not SPARQL semantics. Default LIMIT is 128 and the maximum is 2,048;
 BUDGET defaults to 16,384 and has a maximum of 1,048,576 work units. There are at most eight
 JOIN/INCLUDE/EXCLUDE relations and 32 projected fields; retained row JSON is capped at 8 MiB.
-GROUP BY has additional group/key ceilings and errors on incomplete aggregation. JOIN and other
+GROUP BY has additional group/key ceilings and errors on incomplete aggregation. Global DISTINCT
+and COUNT DISTINCT share a 65,536-entry / 8 MiB state ceiling; DISTINCT pages recompute the full
+bounded set before slicing. Exact aggregate expressions ignore LIMIT on their input. JOIN and other
 relational clauses use HOPS 1. HOPS applies a repeated relation pattern and retains bounded traversal
 semantics; it is not a substitute for a basic graph pattern with independently bound variables.
 
 All commands in the case studies below are on **one protocol line**, use current grammar and
 explicit large bounds, and select just the fields the adapter needs. The commands containing JOIN
-are **candidate enumerators**, not promises of exhaustive SPARQL results. Raising LIMIT/BUDGET alone
-does not remove their maximums. Result pagination, post-filters, typed evaluation and aggregation are
+are **candidate enumerators** whose native join pages can now be exhausted with CURSOR and
+`complete`. Their original low-level projections and residual RDF filters are deliberately retained
+as a reproducible manifest. Section 6 shows the new native answer/count forms. Raising LIMIT/BUDGET
+alone does not remove their maximums. Result pagination, post-filters, typed evaluation and aggregation are
 part of the conversion, as specified separately for each case.
 
 ### Status key and sample manifest
 
 - **P**: the graph selection can be enumerated with current single-hop paging; a client still adapts
-  the result (projection, distinct or count). There are 17 such cases, including three exact literal
+  the manifest's low-level result (projection, distinct or count), or emits the native forms in
+  section 6. There are 17 such cases, including three exact literal
   VALUES lookups under the proposed term codec.
-- **J**: joined candidate rows need client binding comparisons and a completeness strategy.
+- **J**: joined candidates require bound comparisons and exhaustive paging (both now native); the
+  manifest retains its original adapter-oriented projection.
 - **T**: typed literal semantics require an RDF-aware adapter or future engine support.
 - **A**: a complete typed aggregate plus equality join back to the winners is required.
 
@@ -374,7 +380,7 @@ GRAPH_QUERY MATCH (id='m.0bjd8hq')<-[:radio.radio_program_episode.segments]-(*) 
 
 ### 05. what is the unit used for frequency in the measurement system for millisiemens?
 
-Index **1176**, qid **3205555001000**, level `zero-shot`. Status: **J — joined candidates; client inequality and completeness handling**.
+Index **1176**, qid **3205555001000**, level `zero-shot`. Status: **J — joined candidates; native inequality and continuation available**.
 
 **Meaning.** Find frequency units in the same measurement system as millisiemens. The shared system is a join variable, not the answer.
 
@@ -401,7 +407,7 @@ GRAPH_QUERY MATCH (id='m.0gvb8ml')-[:measurement_unit.conductance_unit.measureme
 
 **Bindings.** `?x2 = m.0gvb8ml`; `?x1 = edge.to`; `?x0 = join1.from`.
 
-**Finish / missing support.** Post-filter `?x0 != ?x1`, then project/deduplicate `join1.from`. The two comparisons against `?x2` are already pushed into WHERE. Use exhaustive client expansion for large joins; `next_cursor=*` on this joined query is not proof of completeness.
+**Finish / missing support.** Post-filter `?x0 != ?x1`, then project/deduplicate `join1.from`. The two comparisons against `?x2` are already pushed into WHERE. Alternatively add `to.id != @join1.from.id` to WHERE and use `RETURN DISTINCT join1.from.id AS value` (remove INCLUDE FIELDS). Drain the native continuation; `complete=true` now certifies exhausted output. Distinct/work capacity errors require an explicit client fallback.
 
 **Dataset expectation:** `m.03nsh` (Hertz); `m.02n9swl` (Megahertz); `m.04j3wb3` (Kilohertz); `g.121lm_nv` (Gigahertz). 4 recorded answer(s).
 
@@ -500,7 +506,7 @@ GRAPH_QUERY MATCH (id='amusement_parks.disney_ride')<-[:type.object.type]-(*) JO
 
 **Bindings.** `?x0 / ?y0 = edge.from`; opening values `?x1 / ?y1 = join1.to`.
 
-**Finish / missing support.** Exhaust the complete candidate relation, apply the inner FILTER, compute MAX using SPARQL aggregate ordering, then retain outer rows pointing to the selected RDF term and satisfying the outer FILTER. Deduplicate `edge.from`. Do not use LIMIT 1: the source lists two tied winners. Equal values with different lexical terms are not automatically join-compatible. Native GROUP BY weight aggregates do not aggregate opening values.
+**Finish / missing support.** Exhaust the complete candidate relation, apply the inner FILTER, compute MAX using SPARQL aggregate ordering, then retain outer rows pointing to the selected RDF term and satisfying the outer FILTER. Deduplicate `edge.from`. Do not use LIMIT 1: the source lists two tied winners. Equal values with different lexical terms are not automatically join-compatible. Native MIN/MAX can aggregate a selected JSON property, but do not supply SPARQL temporal ordering or select an RDF term for this join-back.
 
 **Dataset expectation:** `m.09v0nvf` (Red Car Trolley); `m.03ck7tz` (Radiator Springs Racers). 2 recorded answer(s).
 
@@ -663,7 +669,7 @@ GRAPH_QUERY MATCH (id='m.03qnbsz')<-[:conferences.type_of_conference.conferences
 
 ### 14. what's the status of the websites owned by us office of personnel management?
 
-Index **4339**, qid **3200480001000**, level `compositional`. Status: **J — reversed two-hop candidates plus client post-processing**.
+Index **4339**, qid **3200480001000**, level `compositional`. Status: **J — reversed two-hop candidates; native projection/comparison available**.
 
 **Meaning.** Find the statuses of websites owned by the supplied agency. The status-to-site relation points into the intermediate website.
 
@@ -690,7 +696,7 @@ GRAPH_QUERY MATCH (id='m.044s1w')<-[:internet.website.owner]-(*) INCLUDE (from)-
 
 **Bindings.** `?x2 = m.044s1w`; `?x1 = edge.from`; `?x0 = join1.from`.
 
-**Finish / missing support.** Post-filter `?x0 != ?x1`, then deduplicate `join1.from`. Multiple websites can yield the same status. Preserve the intermediate binding until all FILTERs have been checked; projection before filtering would lose needed information. Use complete client expansion when the join might hit LIMIT.
+**Finish / missing support.** Post-filter `?x0 != ?x1`, then deduplicate `join1.from`. Multiple websites can yield the same status. Preserve the intermediate binding until all FILTERs have been checked; projection before filtering would lose needed information. Alternatively add `from.id != @join1.from.id` and use `RETURN DISTINCT join1.from.id AS value` without INCLUDE FIELDS; exhaust native continuation or handle a bounded-state error with client expansion.
 
 **Dataset expectation:** `m.02hsn4g` (Active). 1 recorded answer(s).
 
@@ -865,7 +871,7 @@ GRAPH_QUERY MATCH (id='lit:ebbb33ffa875519da78d260258729c6d4aa35709fa1cf8dc0633c
 
 ### 20. name the review of reflections on science
 
-Index **6684**, qid **3201177013000**, level `i.i.d.`. Status: **J — forward two-hop candidates plus client inequality**.
+Index **6684**, qid **3201177013000**, level `i.i.d.`. Status: **J — forward two-hop candidates; native projection/comparison available**.
 
 **Meaning.** Find reviews of the work reviewed by the supplied review. Preserve the two different predicates; no inverse relation is assumed from their names.
 
@@ -892,7 +898,7 @@ GRAPH_QUERY MATCH (id='m.0bhcv_9')-[:book.review.work_reviewed]->(*) INCLUDE (to
 
 **Bindings.** `?x2 = m.0bhcv_9`; `?x1 = edge.to`; `?x0 = join1.to`.
 
-**Finish / missing support.** Evaluate `?x0 != ?x1` in the adapter, then project distinct `join1.to`. The source also excludes the supplied review itself: omitting that constant inequality can admit a self answer. Joined LIMIT still needs an exhaustive fallback.
+**Finish / missing support.** Evaluate `?x0 != ?x1` in the adapter, then project distinct `join1.to`. The source also excludes the supplied review itself: omitting that constant inequality can admit a self answer. Alternatively add `to.id != @join1.to.id`, select `RETURN DISTINCT join1.to.id AS value` without INCLUDE FIELDS and exhaust native continuation; a capacity/work error still needs an explicit client fallback.
 
 **Dataset expectation:** `m.0bhcv_m` (In Short: An Urchin in the Storm). 1 recorded answer(s).
 
@@ -923,7 +929,7 @@ GRAPH_QUERY MATCH (id='m.012tm2')-[:measurement_unit.measurement_system.length_u
 
 **Bindings.** `?x1 = m.012tm2`; `?x0 = to`; final scalar `value = cardinality(distinct ?x0)`.
 
-**Finish / missing support.** Drain pages and count the distinct `to` values. Return one integer scalar, including zero for no matches. Cheetah RETURN count counts a bounded number of matched rows; it is not a general replacement for COUNT over a distinct subquery.
+**Finish / missing support.** Drain pages and count the distinct `to` values. Return one integer scalar, including zero for no matches. Legacy RETURN count remains bounded by LIMIT. Replace its projection with `RETURN COUNT(DISTINCT to.id) AS value` for an exact native count over the complete bounded input; this returns 0 on empty input or an explicit error on exhausted bounds.
 
 **Dataset expectation:** `2`. 1 recorded answer(s).
 
@@ -1067,9 +1073,9 @@ for sample reporting, but parsing the actual SPARQL determines execution.
    bag/set semantics. All present examples have an inner SELECT DISTINCT answer, allowing several
    useful semijoin reductions. Do not erase a bound variable needed by another triple, FILTER,
    aggregate or projection.
-5. Push safe constant predicates into WHERE. Leave variable comparisons, incompatible null/error
-   behavior and RDF datatype work in explicit client operators. Never emit field-looking RHS text
-   as if Cheetah would resolve it to another bound field.
+5. Push safe constant predicates into WHERE and term-ID comparisons into explicit `@field`
+   comparisons. Keep incompatible null/error behavior and RDF datatype work in client operators.
+   Bare field-looking RHS text is still a literal; the `@` is mandatory for a bound reference.
 6. Preserve each mediator. Check the eight-relation/32-field limits before emitting a native query;
    split the execution plan rather than dropping constraints to fit the grammar.
 
@@ -1122,10 +1128,15 @@ can finish without an unpageable native JOIN. Type/constant existence probes can
 small point queries. Exact VALUES literals can anchor directly on the term-node ID. For typed
 FILTERs with no fixed term, start from the class node and page the literal predicate per member.
 
-Choose a native JOIN only when a proven cardinality bound makes it complete, or use its candidate
-prefix for exploration without presenting that prefix as the answer. A returned row count equal to
-LIMIT is ambiguous, and the current response does not expose a general joined `complete` flag.
-Even fewer projected answers do not prove completeness after DISTINCT.
+Native JOIN now preserves its complete nested adjacency path in CURSOR and returns explicit
+`complete=true|false`. Page until complete; LIMIT bounds each page rather than the entire joined
+answer. Do not reuse these tokens for a different query, after graph mutation, or after reopen.
+LIMIT/BUDGET/CACHE can change between pages. Exhausted work/output/cursor capacity is an error,
+not a successful incomplete page. Client expansion remains a fallback for work/state bounds.
+`RETURN DISTINCT ... AS value` exhausts the bounded logical input and deduplicates globally before
+paging; each page recomputes the full set. Exact aggregate expressions also require complete input.
+Apply every residual RDF predicate before DISTINCT/count/extrema, keeping those stages in the
+adapter whenever a native scalar predicate cannot faithfully express the RDF operation.
 
 Bound converter memory, requests, intermediate bindings and elapsed time; cooperate with server
 back-off and error responses. Spill distinct/intermediate bindings to a client-owned temporary store
@@ -1186,18 +1197,18 @@ For typed/joined/aggregate cases, record the residual predicates, literal hydrat
 operator tree, resource limits, fallback strategy and required features explicitly. Keep deterministic
 sampling manifests and the dataset hash alongside generated plans for regression comparisons.
 
-## 6. Missing native support and implementation priorities
+## 6. Native support implemented and remaining priorities
 
-These are **proposals**, not syntax accepted by this revision. The tracked roadmap entry is in
-[NEXT_STEPS.md](../NEXT_STEPS.md). Prefer extending the existing GRAPH_QUERY planner/executor and
-canonical command path rather than adding a parallel SPARQL execution engine inside the TCP loop.
+The generic query-language extensions below now use the existing GRAPH_QUERY planner/executor
+and shared command dispatch. RDF import, typed evaluation and a SPARQL compiler remain future work
+tracked in [NEXT_STEPS.md](../NEXT_STEPS.md). No new on-disk byte format or SPARQL TCP surface was added.
 
 | Priority | Capability | Cases motivating it | Concrete acceptance condition / likely owner |
 | --- | --- | --- | --- |
-| P0 | Explicit joined completion and resumable execution | All J/T/A candidate commands | Distinguish exhausted vs limited output; resume all nested join bindings without skipping/duplicating rows. Cursor must encode full join state or refer to a bounded server-side job. `graph_query.go`, parser and job integration if selected |
-| P0 | Bound field-to-field comparisons / variable equality | 05, 14, 16, 20, 24 | Compare resolved fields, reject unbound references, support equality/inequality across join rows and repeated variables. Preserve legacy bare-literal behavior unless new syntax explicitly disambiguates it. `graph_query_expr.go` |
-| P1 | Answer-variable projection, aliases and global DISTINCT | Every example | Select one or more bound fields, alias to `value`, apply distinct across the complete logical result; specify bounded/spillable state or explicit capacity errors. `graph_query_parse.go`, `graph_query.go` |
-| P1 | Arbitrary-field aggregates and exact count | 08, 16, 21 | COUNT over distinct bindings and MIN/MAX over typed bound values; complete input or explicit error, empty-input semantics, all ties on equality join-back. Existing GROUP BY weight fields must keep their wire contract |
+| P0 — shipped | Explicit joined completion and resumable execution | All J/T/A candidate commands | Full nested adjacency cursors, `complete=true|false`, one matching-row lookahead; authenticated per open database handle and guarded by graph epoch. `graph_query_cursor.go`, `graph_query_bindings.go` |
+| P0 — shipped | Bound field-to-field comparisons / variable equality | 05, 14, 16, 20, 24 | Explicit `@field` comparisons resolve bound scalars; unknown joins are rejected; bare RHS literals remain unchanged. JSON null/missing comparisons are false. `graph_query_expr.go` |
+| P1 — shipped | Answer-variable projection, aliases and global DISTINCT | Every example | `RETURN [DISTINCT] field AS value[,...]`; full-input deduplication before slicing, 65,536 keys / 8 MiB shared state, explicit capacity errors. `graph_query_select.go`, `graph_query_bindings.go` |
+| P1 — generic operators shipped; RDF pending | Arbitrary-field aggregates and exact count | 08, 16, 21 | Exact `COUNT(*)`, `COUNT([DISTINCT] field)`, `MIN(field)`, `MAX(field)` with aliases and complete input. Empty COUNT is 0, MIN/MAX null. Uniform JSON number/string extrema only; typed RDF aggregate ordering and term-identity join-back remain client work. Legacy GROUP BY is unchanged |
 | P1 | Versioned RDF term import and typed comparison | 07, 08, 16, 19, 22–24 | Preserve term identity for VALUES (07/19/23); provide numeric/temporal evaluation for FILTER/aggregate cases (08/16/22/24), with datatype errors and timezone handling. Start in the converter; add generic engine capabilities only after semantics are pinned |
 | P2 | Selective value/range access | 22, 24 and larger aggregate inputs | Derived, verified predicate/value indexes reduce class-member enumeration without changing answers or loading graph-wide candidate maps. Exact literal VALUES lookups already have a literal-node adjacency anchor; a new range/index planner is a separate design |
 | P2 | Import readiness, consistency and plan inspection | Whole evaluation | Report import contract/version and graph snapshot identity; expose why an anchor/order was chosen and which operators remain in the client. Add native snapshot support only if concurrent evaluation requires it |
@@ -1214,6 +1225,33 @@ Use the existing telemetry/back-off, managed IO, cache epoch and capacity mechan
 indexes must be rebuildable and verify authoritative graph records. No on-disk byte-width change is
 required merely to express the sampled query shapes.
 
+### Native forms for the converter
+
+For a simple answer variable, retain the documented MATCH/INCLUDE/WHERE and replace
+`RETURN edges INCLUDE FIELDS from` with `RETURN DISTINCT from.id AS value` (or `to.id` for
+an outgoing answer). This yields `[{"value":"entity-id"},...]`; page until complete. If the full
+distinct input exceeds bounds, retain the original paged command and use a spillable client distinct.
+
+Case 05 can now express its dynamic inequality and answer projection together:
+
+```text
+GRAPH_QUERY MATCH (id='m.0gvb8ml')-[:measurement_unit.conductance_unit.measurement_system]->(*) INCLUDE (to)-[:type.object.type]->(id='measurement_unit.measurement_system') JOIN (to)<-[:measurement_unit.unit_of_frequency.measurement_system]-(*) INCLUDE (join1.from)-[:type.object.type]->(id='measurement_unit.unit_of_frequency') WHERE to.id != 'm.0gvb8ml' AND join1.from.id != 'm.0gvb8ml' AND to.id != @join1.from.id RETURN DISTINCT join1.from.id AS value LIMIT 2048 BUDGET 1048576
+```
+
+Case 21 can compute the exact distinct count directly:
+
+```text
+GRAPH_QUERY MATCH (id='m.012tm2')-[:measurement_unit.measurement_system.length_units]->(*) INCLUDE (to)-[:type.object.type]->(id='measurement_unit.distance_unit') WHERE to.id != 'm.012tm2' RETURN COUNT(DISTINCT to.id) AS value BUDGET 1048576
+```
+
+`RETURN COUNT(*) AS rows,MIN(join1.to.props.numeric) AS low,MAX(join1.to.props.numeric) AS high`
+illustrates multiple arbitrary-field aggregates **only for an explicitly compatible numeric import**.
+It does not make `props.numeric` authoritative RDF data. Do not substitute bytewise MIN/MAX of
+`lexical` for cases 08/16, or float64 comparisons for cases 22/24 without datatype validation.
+Aliases use identifiers, at most 32 selected fields are accepted, and aggregate expressions cannot
+be mixed with ordinary fields or GROUP BY. Joined legacy return modes and all new selected modes
+expose completion; existing single-hop legacy wire shapes remain unchanged.
+
 ## 7. Validation performed and later conformance suite
 
 - Verified all 24 displayed source bodies against the selected JSON rows, the dataset hash, qids,
@@ -1222,6 +1260,13 @@ required merely to express the sampled query shapes.
   and `pair_index_bytes=2` (48 command/stride cases). Each fixture had a matching triple neighborhood
   and a distractor; returned projected endpoint IDs were checked against the documented variable
   bindings. The temporary Go validation harness was removed after running.
+- The native extension regressions in [`graph_query_conversion_test.go`](../src/graph_query_conversion_test.go)
+  verify 2,340 paged chained/reverse join bindings on both trie strides, bound comparisons,
+  answer aliases, global DISTINCT, complete-input count/extrema, empty/tied/missing/mixed-value
+  cases, distinct capacity errors and stale/forged/query-changed/foreign/reopened-handle tokens.
+  Text/binary parity is checked in [`graph_query_test.go`](../src/graph_query_test.go); both binder
+  unit suites and live text/binary projection/continuation/count tests passed. Focused `-race`
+  checks passed for these query paths.
 - `go build ./...`, `go vet ./...` and `go test ./src` passed. The normal source suite includes query
   parser, joins, filters, projection, grouping and pagination coverage.
 

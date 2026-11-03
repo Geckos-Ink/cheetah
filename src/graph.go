@@ -76,12 +76,14 @@ type GraphEdgeRecord struct {
 type graphQueryReturnMode string
 
 const (
-	graphReturnEdges  graphQueryReturnMode = "edges"
-	graphReturnNodes  graphQueryReturnMode = "nodes"
-	graphReturnPaths  graphQueryReturnMode = "paths"
-	graphReturnCount  graphQueryReturnMode = "count"
-	graphReturnRows   graphQueryReturnMode = "rows"
-	graphReturnGroups graphQueryReturnMode = "groups"
+	graphReturnEdges     graphQueryReturnMode = "edges"
+	graphReturnNodes     graphQueryReturnMode = "nodes"
+	graphReturnPaths     graphQueryReturnMode = "paths"
+	graphReturnCount     graphQueryReturnMode = "count"
+	graphReturnRows      graphQueryReturnMode = "rows"
+	graphReturnGroups    graphQueryReturnMode = "groups"
+	graphReturnValues    graphQueryReturnMode = "values"
+	graphReturnAggregate graphQueryReturnMode = "aggregate"
 )
 
 type graphQueryNodePattern struct {
@@ -92,8 +94,9 @@ type graphQueryNodePattern struct {
 
 type graphQueryPredicate struct {
 	graphQueryField
-	Op     string
-	Values []graphQueryLiteral
+	Op        string
+	Values    []graphQueryLiteral
+	Reference *graphQueryField
 }
 
 type graphQueryPlan struct {
@@ -116,6 +119,8 @@ type graphQueryPlan struct {
 	ExcludeFields []string
 	Budget        int
 	CacheOff      bool
+	Select        []graphQuerySelect
+	Distinct      bool
 }
 
 type graphPathView struct {

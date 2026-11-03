@@ -65,7 +65,8 @@ mismatch within task scope, and update stale docs in the same change.
 
 [`docs/conversion_to_cheetah_query.md`](docs/conversion_to_cheetah_query.md) is a source-checked
 GrailQA conversion study: 20 seeded random development queries plus four random coverage supplements,
-with current `GRAPH_QUERY` commands, result-adapter requirements and proposed missing capabilities.
+with current `GRAPH_QUERY` commands, result-adapter requirements, shipped generic query extensions
+and remaining RDF/compiler capabilities.
 Its Freebase RDF import convention is a proposal, not an engine-enforced schema; no converter or
 complete Freebase import is supplied by the study. Follow-up work is tracked in `NEXT_STEPS.md`.
 
@@ -287,6 +288,9 @@ line is re-encoded into a frame. That is why it needs no edit when a command is 
   before LIMIT; exhausted budgets or group capacity return an error. Do not silently emit partial
   aggregates or page through a join using only its base-row cursor. SQL cache memos capture the graph
   epoch before traversal, including negative answers, and use the existing cache lifecycle/ceilings.
+  Joined continuations retain the full nested adjacency path; never resume using only the base key.
+  Explicit `@field` comparisons resolve both operands before predicate pushdown. Answer DISTINCT
+  precedes paging, while exact aggregate expressions exhaust input independently of LIMIT or fail.
 - **Filtered graph pagination resumes after the last consumed adjacency row.**
   `graphScanAdjacency` may fill its output partway through an internal trie page after earlier
   rows were rejected. In that case its cursor is the last returned row's key, not the internal
@@ -628,7 +632,8 @@ and the glue handlers for prediction, cluster, and graph commands. Most feature 
 - **Lifecycle / tables:** `NewDatabase` (creates `pairs/` + `pair_jumps/`, wires cache, file manager,
   scheduler, reducers, prediction store, and closes the main-key handle(s) on every failed initialization
   path), `Close`, `getValuesTable`, `getRecycleTable`, `getPairTable`, `pairTableCache` (fd-bounded LRU
-  of open `PairTable`s via `resolvePairTableLimit`).
+  of open `PairTable`s via `resolvePairTableLimit`). Each open also creates a fresh private
+  `graphQueryCursorKey` for authenticating bounded binding continuations; it is never persisted.
 - **The fd margin is proportional, and that was the bug.** `resolvePairTableLimit` returns
   `max_pair_tables` when configured, else `soft - max(soft/8, 128)` clamped into
   `[minPairTableLimit, maxPairTableLimit]` (64 … 65536). Pair tables are not the process's only
@@ -1034,7 +1039,8 @@ plus a property index.
 #### [`src/graph_query.go`](src/graph_query.go), [`src/graph_query_parse.go`](src/graph_query_parse.go), [`src/graph_query_expr.go`](src/graph_query_expr.go), [`src/graph_query_cache.go`](src/graph_query_cache.go)
 
 SQL-like graph queries over bound adjacency prefixes. `parseGraphQuery` compiles MATCH, endpoint
-JOINs, relationship INCLUDE/EXCLUDE, boolean WHERE, GROUP BY, JSON field projection and bounds.
+JOINs, relationship INCLUDE/EXCLUDE, boolean WHERE, GROUP BY, JSON field projection and bounds;
+aliased field selections, global DISTINCT and exact COUNT/MIN/MAX extend RETURN.
 `graphQueryExecution.scan` streams one page of references and one decoded edge at a time;
 Adjacency references are checked against each authoritative edge before use.
 `ready` pushes predicates whose join endpoints are already bound, and `expand` performs bounded
@@ -1043,7 +1049,9 @@ nested index joins. It never builds a graph-wide property candidate map. The mai
 
 - **Language:** `= != <> < <= > >=`, IN/NOT IN, IS [NOT] NULL, NOT/AND/OR/parentheses;
   edge fields plus endpoint labels/properties; string ordering is bytewise. Properties are case-sensitive.
-  Missing properties retain the historical `!=` behavior; filters use boolean rather than SQL null logic.
+  Missing properties retain the historical literal `!=` behavior; filters use boolean rather than SQL null logic.
+  Explicit RHS `@join1.to.id` resolves a bound scalar with strict JSON types; missing/null operands
+  compare false. Bare field-looking RHS text stays a literal; unbound references are rejected.
   JOIN `(to)-[:type]->(*)` binds `join1`; later patterns can start at `(join1.to)` and predicates use
   `join1.edge.weight` / `join1.to.id`. INCLUDE/EXCLUDE test existence without multiplying rows.
   `RETURN rows` emits `{edge,join1,...}`. GROUP BY implies RETURN groups and aggregates count and
@@ -1055,9 +1063,11 @@ nested index joins. It never builds a graph-wide property candidate map. The mai
   JSON cap 8 MiB. GROUP BY caps 2,048 groups and 1 MiB encoded keys and returns an error on overflow
   or exhausted work, never a partial aggregate. Query text cap 64 KiB, 8 associations, 32 group/
   projection fields, 128 IN members, 32 nested expression levels.
-- **Paging:** ordinary single-hop WHERE / relationship filters / projections preserve consumed-row
-  cursors. JOIN/GROUP BY do not accept cursors; a limited JOIN returns a bounded prefix. Relational
-  clauses and `RETURN rows` require HOPS 1. Plain multihop keeps its existing terminal-edge semantics.
+- **Paging:** ordinary single-hop WHERE / relationship filters / JSON projections preserve consumed-row
+  cursors. JOIN and selected bindings return authenticated full-path continuations plus explicit
+  `complete=true|false`. A lookahead distinguishes exact exhaustion from LIMIT. GROUP BY and exact
+  aggregate expressions reject cursors. Relational clauses / selected bindings require HOPS 1.
+  Plain multihop keeps its existing terminal-edge semantics.
 - **Cache:** only repeated expensive relationship existence checks are eligible. A fixed 64-slot
   history gates sampled admission; the first observation and cheap point probes create no rows.
   Yes/no memos use the existing fixed-byte query-cache codec under `\x07gc:q/sql-exists-v1-…`,
@@ -1068,6 +1078,35 @@ nested index joins. It never builds a graph-wide property candidate map. The mai
   and [`graph_uncertainty_test.go`](src/graph_uncertainty_test.go); both client query wrappers pass
   clauses through and decode RETURN groups/rows without a second grammar. Python preserves spaces
   inside quoted literals. Both wrappers require one command line.
+
+#### [`src/graph_query_cursor.go`](src/graph_query_cursor.go), [`src/graph_query_bindings.go`](src/graph_query_bindings.go), [`src/graph_query_select.go`](src/graph_query_select.go)
+
+Generic binding operators needed by the GrailQA conversion study, behind the existing GRAPH_QUERY
+handler. The streaming walker retains one adjacency key per MATCH/JOIN depth; resumption reloads
+saved ancestors, skips the emitted binding, then seeks after each nested key. The last emitted path
+is retained while one extra matching row determines `complete=true|false`. Existing edge/path/row
+projection uses the same `bindingValue` formatter in both legacy and joined execution.
+
+- `RETURN [DISTINCT] field AS alias[,...]` returns `return=values` with an array of aliased objects;
+  endpoint property fields hydrate nodes, absent fields become null. DISTINCT exhausts input before
+  paging deterministically sorted JSON keys and recomputes the bounded set for each page.
+- `COUNT(*)`, `COUNT([DISTINCT] field)`, `MIN(field)` / `MAX(field)` return `return=aggregate`, one
+  object, complete input or an error. LIMIT never truncates aggregate input. Null/missing fields
+  are skipped; empty counts are zero and extrema null. MIN/MAX require uniformly float64 numeric
+  or uniformly bytewise string values; JSON types remain distinct. These are generic operators,
+  not RDF numeric/temporal evaluation or SPARQL subqueries. Aggregates cannot mix ordinary fields
+  or GROUP BY; the old count and group modes retain their meanings.
+- DISTINCT state is shared across aggregate selections, capped at 65,536 entries / 8 MiB; overflow
+  and exhausted BUDGET are errors. Selection width is 32. No graph-wide candidate map or persistent
+  query-state store is introduced.
+- Continuations carry query fingerprint, graph epoch and full path (or a global-distinct output
+  offset), authenticated using a random per-open-database key owned by `Database`. Decoded tokens
+  cap at 24 KiB. LIMIT/BUDGET/CACHE may change; different queries, handles, graph mutations or
+  modified tokens are rejected. An observed epoch change during execution fails the request. This
+  is an invalidation guard, not a cross-request/concurrent snapshot; exact evaluation uses a
+  quiescent graph. Both binders expose optional completion and pass tokens back verbatim.
+- Tests: [`graph_query_conversion_test.go`](src/graph_query_conversion_test.go), plus text/binary
+  parity in [`graph_query_test.go`](src/graph_query_test.go).
 
 #### [`src/graph_recall.go`](src/graph_recall.go)
 
@@ -1492,6 +1531,14 @@ literals; a layered multihop graph checks the global frontier ceiling, and stale
 are rejected before they can escape the anchored prefix.
 `BenchmarkGraphQueryStreamingJoin` reports allocations for a 64-row join/group workload.
 
+#### [`src/graph_query_conversion_test.go`](src/graph_query_conversion_test.go)
+
+Both-stride coverage for bound-field comparisons and boolean predicate readiness; 2,340 joined
+bindings paged across chained/reverse joins and existence/anti-existence filters; exact last-page
+completion; invalid/query-changed/forged/stale continuation rejection; global DISTINCT across repeated
+paths; exact count beyond LIMIT; empty aggregates, missing fields, scalar type guards and tied
+extrema. Distinct entry/byte capacity guards are also exercised.
+
 #### [`src/graph_recall_test.go`](src/graph_recall_test.go)
 
 Associative recall: multi-seed convergence and the `min_sources=2` view, novelty ordering (a distant
@@ -1669,7 +1716,8 @@ free-function command layers — [`lib/kv.js`](binders/nodejs/lib/kv.js) (the tw
 `pairSet`/`pairSummary`/`purgePrefix`/`deleteValue`, batches, scans),
 [`lib/graph.js`](binders/nodejs/lib/graph.js) (the whole `GRAPH_*` surface — nodes with
 `references`, edges single and batched, `neighbors`/`neighborsAll`/`neighborTypes`/`degree`,
-`query`, `buildTraversal` (bounded structured single-hop queries, delimiter-validated ids/types),
+`query` (including optional `complete` for joined/selected results), `buildTraversal` (bounded
+structured single-hop queries, delimiter-validated ids/types),
 `recall`/`recallBatched`, id-based `recallAsync`/`fetchRecall`/`awaitRecall`, `similar`,
 `termIndex`, and the `GRAPH_AMBIGUITY_*` trio),
 [`lib/records.js`](binders/nodejs/lib/records.js) (the `RECORD` family plus `DEL records`, with
@@ -1743,7 +1791,8 @@ for a dead socket; `ThreadLocalClientPool`, one socket per thread, retaining reg
 objects across `close_all()` so post-reset reconnects remain owned), the free-function layers
 [`kv.py`](binders/python/cheetah_db/kv.py) (including `PAIR_PUT_BATCH`),
 [`graph.py`](binders/python/cheetah_db/graph.py) (the whole `GRAPH_*` surface, including
-`recall_async`/`fetch_recall`/`await_recall` by job id),
+`recall_async`/`fetch_recall`/`await_recall` by job id, and optional `query()["complete"]`
+for joined/selected results),
 [`records.py`](binders/python/cheetah_db/records.py) (the `RECORD` family plus `DEL records`, with
 `field_spec` validating a field declaration — reserved names included — before the wire, plus
 `select`/`iter_selected` and the optional index lifecycle),
@@ -1909,8 +1958,10 @@ Plus [`keys.py`](binders/python/cheetah_db/keys.py),
 - **Behavior:** typed nodes/edges, adjacency indexes, maintained property equality indexes, batch
   upsert and bounded multihop traversal. Single-hop queries support boolean WHERE with numeric/string
   ordering and membership/null tests, bound endpoint JOINs, relationship INCLUDE/EXCLUDE, GROUP BY
-  with count/weight aggregates, and INCLUDE FIELDS/EXCLUDE FIELDS projection. Streaming and global
-  work/group/output bounds keep execution bounded; repeated expensive relationship checks reuse
+  with count/weight aggregates, and INCLUDE FIELDS/EXCLUDE FIELDS projection. Explicit `@field`
+  comparisons, resumable joined bindings with completion, aliased/global-distinct answer selection
+  and exact arbitrary-field COUNT/MIN/MAX support later RDF conversion. RDF typed semantics remain
+  client work. Streaming and global work/group/output/distinct bounds keep execution bounded; repeated expensive relationship checks reuse
   the usage-aged association cache. See the `graph_query*.go` source reference and README grammar.
 - **Owners:** [`graph.go`](src/graph.go), `graph_query*.go`. **Tests:**
   [`graph_test.go`](src/graph_test.go), [`graph_query_test.go`](src/graph_query_test.go).
@@ -2208,7 +2259,7 @@ plus the two front-end handlers. There is no generated API manifest.
 | `PAIR_SET(_HIDDEN)`, `PAIR_GET` | [`commands.go`](src/commands.go) |
 | `PAIR_SCAN`, `PAIR_SUMMARY` | [`database.go`](src/database.go) (`PairScanWithOptions`, `PairSummaryWithOptions`) |
 | `PAIR_REDUCE` | [`database.go`](src/database.go) + [`reducers.go`](src/reducers.go); its async forms go through [`jobs.go`](src/jobs.go) |
-| `GRAPH_NODE_*`, `GRAPH_EDGE_*`, `GRAPH_NEIGHBORS`, `GRAPH_DEGREE`, `GRAPH_NEIGHBOR_TYPES`, `GRAPH_QUERY` | [`graph.go`](src/graph.go), [`graph_query.go`](src/graph_query.go), [`graph_query_parse.go`](src/graph_query_parse.go), [`graph_query_expr.go`](src/graph_query_expr.go), [`graph_query_cache.go`](src/graph_query_cache.go) |
+| `GRAPH_NODE_*`, `GRAPH_EDGE_*`, `GRAPH_NEIGHBORS`, `GRAPH_DEGREE`, `GRAPH_NEIGHBOR_TYPES`, `GRAPH_QUERY` | [`graph.go`](src/graph.go), [`graph_query.go`](src/graph_query.go), [`graph_query_parse.go`](src/graph_query_parse.go), [`graph_query_expr.go`](src/graph_query_expr.go), [`graph_query_cache.go`](src/graph_query_cache.go), [`graph_query_cursor.go`](src/graph_query_cursor.go), [`graph_query_bindings.go`](src/graph_query_bindings.go), [`graph_query_select.go`](src/graph_query_select.go) |
 | `GRAPH_AMBIGUITY_SET/GET/RESOLVE` | [`graph_uncertainty.go`](src/graph_uncertainty.go) |
 | `GRAPH_RECALL` (including bounded complete references, adaptive decay, and the shared sync/job execution path), `GRAPH_SIMILAR`, `GRAPH_TERM_INDEX` | [`graph_recall.go`](src/graph_recall.go), [`graph_decay.go`](src/graph_decay.go), [`graph_term_index.go`](src/graph_term_index.go), [`micro_job.go`](src/micro_job.go) |
 | `GRAPH_CACHE stats/config/get/links/common/put/prune`, `DEL graph_cache` | [`micro_graph_cache.go`](src/micro_graph_cache.go), [`graph_cache.go`](src/graph_cache.go), [`graph_cache_budget.go`](src/graph_cache_budget.go), [`engine.go`](src/engine.go) |
@@ -2412,6 +2463,7 @@ seen in old docs are **client-side**; the server does not read them.
 | Graph edge lifecycle + query | [`TestGraphEdgeLifecycleAndQuery`](src/graph_test.go) |
 | `GRAPH_QUERY` parser rules | [`TestParseGraphQueryRules`](src/graph_test.go), [`TestGraphQueryRelationalParserRejectsUnboundedOrMalformedPlans`](src/graph_query_test.go) |
 | SQL-like WHERE, JOIN, INCLUDE/EXCLUDE, projection, streamed GROUP BY and bounds | [`graph_query_test.go`](src/graph_query_test.go) |
+| GrailQA query primitives: @field comparison, joined continuation/completion, aliases, global DISTINCT, exact count/extrema and state bounds | [`graph_query_conversion_test.go`](src/graph_query_conversion_test.go) |
 | SQL association repeat admission, epoch invalidation and aging | [`TestGraphQueryAssociationCacheAdmissionInvalidationAndAging`](src/graph_query_test.go) |
 | Batch edge upsert (+ continue-on-error) | [`TestGraphEdgeSetBatchAndDegree`](src/graph_test.go), [`TestGraphEdgeSetBatchContinueOnError`](src/graph_test.go) |
 | Multi-hop bounds + cost limits | [`TestGraphQueryMultiHopBoundsAndCost`](src/graph_test.go) |
@@ -2473,18 +2525,18 @@ seen in old docs are **client-side**; the server does not read them.
 | End-to-end WebNLG graph validation over TCP (concurrent ingest/rewrite, adjacency paging, recall, delete, restart, both strides) | [`TestWebNLGEndToEnd`](demo/graph-web_nlg/main_test.go) (`CHEETAH_WEBNLG_E2E=1`) |
 | Node binder: response grammar, `value=` to end of line, `x<HEX>` escaping, verbatim cursors; binary transcoding preserves latin1-spelled UTF-8 payload bytes | [`binders/nodejs/test/protocol.test.js`](binders/nodejs/test/protocol.test.js), [`binders/nodejs/test/binary.test.js`](binders/nodejs/test/binary.test.js) (`node --test`) |
 | Node binder: fixed-width hex ordering, integer bucketing and tolerance sweeps | [`binders/nodejs/test/keys.test.js`](binders/nodejs/test/keys.test.js) |
-| Node binder: graph command shapes, recall evidence/merging, detached recall retrieval by id | [`binders/nodejs/test/graph.test.js`](binders/nodejs/test/graph.test.js) |
+| Node binder: graph command shapes, recall evidence/merging, detached recall retrieval by id, query completion/aliases | [`binders/nodejs/test/graph.test.js`](binders/nodejs/test/graph.test.js) |
 | Node binder: `CheetahDatabase` layout guard, owned-pool binary transport forwarding, mutation chain, id allocation, accounting | [`binders/nodejs/test/database.test.js`](binders/nodejs/test/database.test.js) |
 | Node/Python server launchers select `cheetah-server.exe` on Windows | [`binders/nodejs/test/server.test.js`](binders/nodejs/test/server.test.js), [`binders/python/tests/test_server.py`](binders/python/tests/test_server.py) |
-| Node binder against a live server (KV, batch, scan paging, recall, reset, pipelining) | [`binders/nodejs/test/integration.test.js`](binders/nodejs/test/integration.test.js) (`CHEETAH_INTEGRATION=1`) |
+| Node binder against a live server (KV, batch, scan paging, recall, reset, pipelining, text/binary query completion/distinct/count) | [`binders/nodejs/test/integration.test.js`](binders/nodejs/test/integration.test.js) (`CHEETAH_INTEGRATION=1`) |
 | Python binder: response grammar, `value=` to end of line, `x<HEX>` escaping, verbatim cursors | [`binders/python/tests/test_protocol.py`](binders/python/tests/test_protocol.py) (`python3 -m unittest`) |
 | Python binder: fixed-width hex ordering, integer bucketing and tolerance sweeps | [`binders/python/tests/test_keys.py`](binders/python/tests/test_keys.py) |
 | Python binder: two-step write, `PAIR_PUT_BATCH` item escaping and partial-batch refusal, cursor paging | [`binders/python/tests/test_kv.py`](binders/python/tests/test_kv.py) |
-| Python binder: `GRAPH_*` encoding, clamped recall bounds, batched noisy-OR merge, detached recall retrieval by id | [`binders/python/tests/test_graph.py`](binders/python/tests/test_graph.py) |
+| Python binder: `GRAPH_*` encoding, clamped recall bounds, batched noisy-OR merge, detached recall retrieval by id, query completion/aliases | [`binders/python/tests/test_graph.py`](binders/python/tests/test_graph.py) |
 | Python binder: `JOB` submit/poll/fetch, consumed job, failure and timeout | [`binders/python/tests/test_jobs.py`](binders/python/tests/test_jobs.py) |
 | Python binder: socket handshake, reconnect, inactivity grace, thread-local pool and post-reset close ownership | [`binders/python/tests/test_client.py`](binders/python/tests/test_client.py) |
 | Python binder: `CheetahDatabase` layout guard, per-key mutation lock, id allocation, accounting | [`binders/python/tests/test_database.py`](binders/python/tests/test_database.py) |
-| Python binder against a live server (KV, binary, batch, hidden pairs, paging, recall, jobs, reset) | [`binders/python/tests/test_integration.py`](binders/python/tests/test_integration.py) (`CHEETAH_INTEGRATION=1`) |
+| Python binder against a live server (KV, binary, batch, hidden pairs, paging, recall, jobs, reset, text/binary query completion/distinct/count) | [`binders/python/tests/test_integration.py`](binders/python/tests/test_integration.py) (`CHEETAH_INTEGRATION=1`) |
 
 **Known test gaps:** no focused coverage for prediction-table train/inherit, cluster
 scheduling/gossip, the payload cache, or remaining cursor pagination edge cases (filtered graph paging is covered). Jump split/promote cycles are
@@ -2539,7 +2591,10 @@ coverage ([`graph_test.go`](src/graph_test.go)) and a gated real-execution path 
 - Reducers: `counts`/`probabilities`/`continuations` + graph `degree`/`triangle`/`pagerank_seed`,
   sync and async.
 - Graph store with batch upsert and bounded multi-hop `GRAPH_QUERY`, plus streaming single-hop boolean filtering, endpoint joins,
-  relationship filters, grouping, field projection and repeat-admitted association memos.
+  relationship filters, grouping, field projection and repeat-admitted association memos. Joined
+  bindings now resume with full-path cursors and explicit completion; `@field` comparisons,
+  aliased/global-distinct answer selection and exact COUNT/MIN/MAX provide generic conversion
+  primitives. RDF import/datatype evaluation and the SPARQL converter remain unimplemented.
 - Associative recall: multi-seed `GRAPH_RECALL` with noisy-OR convergence, bounded complete node/
   episodic reference hydration, `GRAPH_SIMILAR`, and the `\x05gt:` lexical term index behind
   `GRAPH_TERM_INDEX`, including IDF frequencies and bounded typo repair. Recall decay adapts from
@@ -2566,19 +2621,21 @@ coverage ([`graph_test.go`](src/graph_test.go)) and a gated real-execution path 
 - **Node.js binder** ([`binders/nodejs/`](binders/nodejs/)) — dependency-free client: codec, pooled
   TCP client, KV/graph/record/job/prediction/admin helpers, key primitives, token vocabulary,
   subclassable `CheetahDatabase`, the binary transport and the `ALIAS` discovery layer, and a
-  test-server launcher. Verified by its own suite (146 passing unit tests, one gated integration test) plus a live round-trip against a spawned server (`CHEETAH_INTEGRATION=1`, 20 subtests: KV,
+  test-server launcher. Verified by its own suite (147 passing unit tests, one gated integration test) plus a live round-trip against a spawned server (`CHEETAH_INTEGRATION=1`, 21 subtests: KV,
   UTF-8 payloads, batch writes, cursor paging, the `continuations` reducer, vocabulary allocation,
   `GRAPH_RECALL` convergence, a record table through define/partial-write/add/drop/compact/drop,
   `DB_CREATE` with its own settings, a detached `JOB` reduce, server gauges, subclass lifecycle,
-  layout-mismatch refusal, `RESET_DB` across a pool, pipelining).
+  layout-mismatch refusal, `RESET_DB` across a pool, pipelining, text/binary joined projection,
+  distinct continuation and exact count).
 - **Python binder** ([`binders/python/`](binders/python/)) — standard-library-only client covering
   the same surface, with the differences that follow from a synchronous host (no pipelining; one
-  socket per thread; binary payloads base64 rather than latin1). Verified by its own suite (180 passing
-  tests against an in-memory stand-in, 14 gated integration skips) plus a live round-trip against a spawned server
-  (`CHEETAH_INTEGRATION=1`, 14 tests: UTF-8 and binary payloads, `PAIR_PUT_BATCH`, hidden pairs,
+  socket per thread; binary payloads base64 rather than latin1). Verified by its own suite (181 passing
+  tests against an in-memory stand-in, 15 gated integration skips) plus a live round-trip against a spawned server
+  (`CHEETAH_INTEGRATION=1`, 15 tests: UTF-8 and binary payloads, `PAIR_PUT_BATCH`, hidden pairs,
   cursor paging, the `continuations` reducer, graph write/degree/recall, record-table lifecycle and
   schema evolution, `DB_CREATE` settings, a detached `JOB` reduce,
-  `SYSTEM_STATS`/`FILE_CHECKPOINT`, vocabulary allocation, layout guard and `RESET_DB`).
+  `SYSTEM_STATS`/`FILE_CHECKPOINT`, vocabulary allocation, layout guard, `RESET_DB` and text/binary
+  joined projection, distinct continuation and exact count).
 - **Both binders wrap the same command inventory.** A command added on the Go side is not finished
   until both spell it: that parity is the point of keeping them in this repository.
 

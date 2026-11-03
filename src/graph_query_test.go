@@ -57,7 +57,7 @@ func TestGraphQueryRelationalParserRejectsUnboundedOrMalformedPlans(t *testing.T
 		"WHERE edge.weight = 1 AND", "WHERE to.label > 'a'", "WHERE edge.directed > true",
 		"WHERE edge.type IN ()", "WHERE edge.weight = 1 WHERE edge.weight = 2",
 		"WHERE join1.to.id = 'x'", "JOIN (*)-[:t]->(*)", "JOIN (id='x')-[:t]->(*)",
-		"JOIN (join1.to)-[:t]->(*)", "JOIN (to)-[:t]->(*) CURSOR x01",
+		"JOIN (join1.to)-[:t]->(*)",
 		"JOIN (to)-[:t]->(*) HOPS 2", "GROUP BY edge.type CURSOR x01",
 		"HOPS 17..18", "BRANCH 2 BRANCH_LIMIT 3", "COST 1 COST_LIMIT 2",
 		"GROUP BY edge.type RETURN edges", "RETURN groups", "RETURN count INCLUDE FIELDS id",
@@ -307,6 +307,7 @@ func TestGraphQueryTextAndBinaryShareRelationalDispatch(t *testing.T) {
 	engine, db := newRecordTestEngine(t)
 	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=hub to=person type=knows weight=0.5", "SUCCESS")
 	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=person to=org type=works_at", "SUCCESS")
+	assertCommandPrefix(t, db, "GRAPH_EDGE_SET from=person to=org2 type=works_at", "SUCCESS")
 	clause := "MATCH (id='hub')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE edge.weight <> 0 AND NOT join1.to.id = 'closed' GROUP BY join1.to.id RETURN groups"
 	want := assertCommandPrefix(t, db, "GRAPH_QUERY "+clause, "SUCCESS")
 	for _, binary := range []bool{false, true} {
@@ -351,6 +352,21 @@ func TestGraphQueryTextAndBinaryShareRelationalDispatch(t *testing.T) {
 			}
 			if response := exchange(clause); response != want {
 				t.Fatalf("transport drift: %s != %s", response, want)
+			}
+			selection := "MATCH (id='hub')-[:knows]->(*) JOIN (to)-[:works_at]->(*) WHERE from.id != @join1.to.id RETURN DISTINCT join1.to.id AS value LIMIT 1"
+			first := assertCommandPrefix(t, db, "GRAPH_QUERY "+selection, "SUCCESS,return=values,matches=1")
+			if response := exchange(selection); response != first {
+				t.Fatalf("selection transport drift: %s != %s", response, first)
+			}
+			continuation := selection + " CURSOR " + responseField(first, "next_cursor")
+			last := assertCommandPrefix(t, db, "GRAPH_QUERY "+continuation, "SUCCESS,return=values,matches=1")
+			if response := exchange(continuation); response != last || responseField(response, "complete") != "true" {
+				t.Fatalf("continuation transport drift: %s != %s", response, last)
+			}
+			aggregate := "MATCH (id='hub')-[:knows]->(*) JOIN (to)-[:works_at]->(*) RETURN COUNT(DISTINCT join1.to.id) AS value"
+			exact := assertCommandPrefix(t, db, "GRAPH_QUERY "+aggregate, "SUCCESS,return=aggregate,matches=1")
+			if response := exchange(aggregate); response != exact {
+				t.Fatalf("aggregate transport drift: %s != %s", response, exact)
 			}
 			if response := exchange(`MATCH (id='hub')-[:knows]->(*) WHERE edge.modality = '\n' RETURN count`); !strings.HasPrefix(response, "ERROR") || strings.ContainsAny(response, "\r\n") {
 				t.Fatalf("malformed literal broke the response line: %q", response)

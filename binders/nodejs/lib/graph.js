@@ -453,15 +453,17 @@ async function degree(conn, { id, direction = 'out', type = null, weighted = fal
     };
 }
 
-/** Run a graph clause (including JOIN/GROUP BY/INCLUDE/EXCLUDE). Payload follows RETURN. */
+/** Run a graph clause. Explicit completion is exposed when supplied by the server. */
 async function query(conn, clause) {
     const response = await commandOrThrow(conn, buildQuery(clause), 'GRAPH_QUERY');
-    return {
+    const result = {
         mode: response.fields.return || null,
         matches: numericField(response.fields, 'matches', 0),
         nextCursor: parseCursor(response.fields),
         payload: decodePayload(response.fields),
     };
+    if (response.fields.complete !== undefined) result.complete = response.fields.complete === 'true';
+    return result;
 }
 
 /**

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"container/heap"
 	"container/list"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -77,6 +78,9 @@ type Database struct {
 	clusterMessenger *ClusterMessenger
 	jobs             *microJobManager
 	reducers         *ReducerRegistry
+
+	graphQueryCursorKey [32]byte
+
 	// closeOnce rende Close idempotente: spegnimento per segnale, EXIT dalla
 	// CLI e Engine.Close possono arrivare tutti sullo stesso database.
 	closeOnce sync.Once
@@ -400,6 +404,10 @@ func (db *Database) nextChunk(key []byte, offset int) ([]byte, uint32, bool, err
 }
 
 func NewDatabase(name, path string, monitor *ResourceMonitor, cfg DatabaseConfig, maxPairTables int) (*Database, error) {
+	var cursorKey [32]byte
+	if _, err := rand.Read(cursorKey[:]); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(path, 0755); err != nil {
 		return nil, err
 	}
@@ -484,6 +492,8 @@ func NewDatabase(name, path string, monitor *ResourceMonitor, cfg DatabaseConfig
 		forkScheduler:      newForkScheduler(path),
 		jobs:               newMicroJobManager(),
 		reducers:           newReducerRegistry(),
+
+		graphQueryCursorKey: cursorKey,
 	}
 	db.predictStore = newPredictionManager(path)
 	db.recordStore = newRecordManager(filepath.Join(path, "records"))

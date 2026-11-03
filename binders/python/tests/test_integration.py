@@ -85,6 +85,22 @@ class LiveServerTests(unittest.TestCase):
         result = graph.recall(self.conn, ["ctx:weather"], hops=1)
         self.assertTrue(any(a["id"] == "term:rain" for a in result["associations"]))
 
+    def test_graph_query_answer_projection_and_exact_count(self) -> None:
+        graph.set_edge(self.conn, from_id="ql:a", to_id="ql:b", edge_type="t")
+        for target in ("ql:c", "ql:d"):
+            graph.set_edge(self.conn, from_id="ql:b", to_id=target, edge_type="u")
+        for conn in (self.conn, self._binary_client()):
+            base = "MATCH (id='ql:a')-[:t]->(*) JOIN (to)-[:u]->(*) WHERE from.id != @join1.to.id "
+            clause = base + "RETURN DISTINCT join1.to.id AS value LIMIT 1"
+            first = graph.query(conn, clause)
+            self.assertFalse(first["complete"])
+            second = graph.query(conn, clause + " CURSOR " + first["cursor"])
+            self.assertTrue(second["complete"])
+            self.assertEqual(sorted(row["value"] for row in first["payload"] + second["payload"]), ["ql:c", "ql:d"])
+            exact = graph.query(conn, base + "RETURN COUNT(DISTINCT join1.to.id) AS value LIMIT 1")
+            self.assertTrue(exact["complete"])
+            self.assertEqual(exact["payload"], [{"value": 2}])
+
     def test_detached_reduce_round_trip(self) -> None:
         kv.put_values_batch(self.conn, [(f"j:{index}", f"v{index}") for index in range(5)])
         self.assertTrue(jobs.supports_job_api(self.conn))

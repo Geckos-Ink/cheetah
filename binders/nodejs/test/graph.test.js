@@ -334,3 +334,17 @@ test('relational queries preserve literals and decode grouped and projected rows
     assert.deepEqual(result.payload, groups);
     for (const separator of ['\n', '\r']) assert.throws(() => graph.buildQuery(`MATCH${separator}(id='a')`), /one line/);
 });
+
+test('query exposes joined completion and passes bound references and aliases verbatim', async () => {
+    const clause = "MATCH (id='a')-[:t]->(*) JOIN (to)-[:u]->(*) WHERE from.id != @join1.to.id RETURN DISTINCT join1.to.id AS value LIMIT 1";
+    const conn = fakeConn(() => `SUCCESS,return=values,matches=1,next_cursor=base64:opaque,complete=false,payload=${payloadOf([{ value: 'c' }])}`);
+    const result = await graph.query(conn, clause);
+    assert.equal(conn.lines[0], `GRAPH_QUERY ${clause}`);
+    assert.equal(result.complete, false);
+    assert.equal(result.nextCursor, 'base64:opaque');
+    assert.deepEqual(result.payload, [{ value: 'c' }]);
+    const aggregate = fakeConn(() => `SUCCESS,return=aggregate,matches=1,next_cursor=*,complete=true,payload=${payloadOf([{ value: 270 }])}`);
+    const exact = await graph.query(aggregate, "MATCH (id='a')-[:t]->(*) RETURN COUNT(DISTINCT to.id) AS value");
+    assert.equal(exact.complete, true);
+    assert.deepEqual(exact.payload, [{ value: 270 }]);
+});
