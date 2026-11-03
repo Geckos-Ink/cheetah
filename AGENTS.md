@@ -63,6 +63,12 @@ mismatch within task scope, and update stale docs in the same change.
 7. [`NEXT_STEPS.md`](NEXT_STEPS.md) — the roadmap, with a "Done" section that records what shipped
    and how it was verified. Treat the open items as intent and verify against code.
 
+[`docs/conversion_to_cheetah_query.md`](docs/conversion_to_cheetah_query.md) is a source-checked
+GrailQA conversion study: 20 seeded random development queries plus four random coverage supplements,
+with current `GRAPH_QUERY` commands, result-adapter requirements and proposed missing capabilities.
+Its Freebase RDF import convention is a proposal, not an engine-enforced schema; no converter or
+complete Freebase import is supplied by the study. Follow-up work is tracked in `NEXT_STEPS.md`.
+
 This file was previously named `AI_REFERENCE.md` (renamed in `168f67e`). External notes and the
 parent monorepo may still refer to it under that name, or as `cheetah-db/AI_REFERENCE.md` — the
 handbook here is `AGENTS.md`, and [`README.md`](README.md) links it as such.
